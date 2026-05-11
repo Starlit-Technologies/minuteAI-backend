@@ -4,10 +4,24 @@ from sqlalchemy import create_engine, Column, String, Text, DateTime, Boolean, I
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 _db_path = Path(__file__).parent.parent / "storage" / "minuteai.db"
-DATABASE_URL = os.environ.get("DATABASE_URL", f"sqlite:///{_db_path}")
 
-_connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
-engine = create_engine(DATABASE_URL, connect_args=_connect_args)
+
+def _database_url() -> str:
+    """Use Supabase/Postgres in production, SQLite only as the local fallback."""
+    configured = os.environ.get("DATABASE_URL", "").strip()
+    if not configured:
+        return f"sqlite:///{_db_path}"
+    if configured.startswith("postgres://"):
+        return configured.replace("postgres://", "postgresql://", 1)
+    return configured
+
+
+DATABASE_URL = _database_url()
+
+_is_sqlite = DATABASE_URL.startswith("sqlite")
+_connect_args = {"check_same_thread": False} if _is_sqlite else {}
+_engine_kwargs = {"pool_pre_ping": True} if not _is_sqlite else {}
+engine = create_engine(DATABASE_URL, connect_args=_connect_args, **_engine_kwargs)
 SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
 Base = declarative_base()
 
@@ -101,7 +115,9 @@ def create_tables():
 
 
 def _migrate_tasks_job_id_nullable():
-    """Make tasks.job_id nullable — requires table recreation in SQLite (idempotent)."""
+    """Make tasks.job_id nullable in legacy SQLite databases."""
+    if engine.dialect.name != "sqlite":
+        return
     with engine.connect() as conn:
         try:
             rows = conn.execute(text("PRAGMA table_info(tasks)")).fetchall()
@@ -128,42 +144,66 @@ def _migrate_tasks_job_id_nullable():
             pass
 
 
+def _apply_migration(conn, sql: str):
+    try:
+        conn.execute(text(sql))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+
+
 def run_migrations():
-    """Add new columns to existing tables (SQLite-safe, idempotent)."""
-    migrations = [
-        "ALTER TABLE jobs ADD COLUMN user_id TEXT",
-        "ALTER TABLE jobs ADD COLUMN starred INTEGER NOT NULL DEFAULT 0",
-        "ALTER TABLE users ADD COLUMN timezone TEXT",
-        "ALTER TABLE users ADD COLUMN language TEXT",
-        "ALTER TABLE users ADD COLUMN theme TEXT",
-        "ALTER TABLE team_members ADD COLUMN invite_token TEXT",
-        "ALTER TABLE users ADD COLUMN stripe_customer_id TEXT",
-        "ALTER TABLE users ADD COLUMN stripe_subscription_id TEXT",
-        "ALTER TABLE users ADD COLUMN avatar_url TEXT",
-        # workspaces
-        "CREATE TABLE IF NOT EXISTS workspaces (id TEXT PRIMARY KEY, name TEXT NOT NULL, owner_id TEXT NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)",
-        "ALTER TABLE team_members ADD COLUMN workspace_id TEXT",
-        "ALTER TABLE jobs ADD COLUMN workspace_id TEXT",
-        "CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, job_id TEXT NOT NULL, workspace_id TEXT, title TEXT NOT NULL, owner_name TEXT, assignee_id TEXT, status TEXT NOT NULL DEFAULT 'todo', deadline TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)",
-        "CREATE TABLE IF NOT EXISTS notifications (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, type TEXT NOT NULL, title TEXT NOT NULL, body TEXT, link TEXT, read INTEGER NOT NULL DEFAULT 0, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)",
-        "CREATE TABLE IF NOT EXISTS meeting_bot_sessions (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, workspace_id TEXT, platform TEXT NOT NULL, meeting_url TEXT NOT NULL, title TEXT, bot_name TEXT NOT NULL DEFAULT 'MinuteAI Recorder', status TEXT NOT NULL DEFAULT 'queued', scheduled_for DATETIME, duration_minutes INTEGER, started_at DATETIME, ended_at DATETIME, failure_reason TEXT, recording_path TEXT, job_id TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)",
-        "ALTER TABLE meeting_bot_sessions ADD COLUMN title TEXT",
-        "ALTER TABLE meeting_bot_sessions ADD COLUMN duration_minutes INTEGER",
-        "ALTER TABLE meeting_bot_sessions ADD COLUMN bot_account_id TEXT",
-        "ALTER TABLE meeting_bot_sessions ADD COLUMN calendar_event_id TEXT",
-        "ALTER TABLE meeting_bot_sessions ADD COLUMN source TEXT",
-        "CREATE TABLE IF NOT EXISTS bot_accounts (id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL UNIQUE, email TEXT NOT NULL UNIQUE, display_name TEXT NOT NULL DEFAULT 'MinuteAI Recorder', profile_dir TEXT NOT NULL, provider TEXT NOT NULL DEFAULT 'google', status TEXT NOT NULL DEFAULT 'needs_setup', kind TEXT NOT NULL DEFAULT 'dedicated', created_at DATETIME DEFAULT CURRENT_TIMESTAMP)",
-        "CREATE TABLE IF NOT EXISTS admin_grants (id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, created_by_id TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)",
-        "CREATE TABLE IF NOT EXISTS promo_codes (id TEXT PRIMARY KEY, code TEXT NOT NULL UNIQUE, description TEXT, discount_type TEXT NOT NULL DEFAULT 'percent', discount_value INTEGER NOT NULL DEFAULT 0, active INTEGER NOT NULL DEFAULT 1, max_uses INTEGER, uses_count INTEGER NOT NULL DEFAULT 0, expires_at DATETIME, created_by_id TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)",
-        "CREATE TABLE IF NOT EXISTS promo_code_redemptions (id TEXT PRIMARY KEY, promo_code_id TEXT NOT NULL, user_id TEXT, checkout_session_id TEXT NOT NULL UNIQUE, subscription_id TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)",
-    ]
+    """Add legacy columns/tables in a way that works for SQLite and Supabase Postgres."""
+    if engine.dialect.name == "postgresql":
+        migrations = [
+            "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS user_id TEXT",
+            "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS starred BOOLEAN NOT NULL DEFAULT false",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS timezone TEXT",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS language TEXT",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS theme TEXT",
+            "ALTER TABLE team_members ADD COLUMN IF NOT EXISTS invite_token TEXT",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS stripe_customer_id TEXT",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS stripe_subscription_id TEXT",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url TEXT",
+            "ALTER TABLE team_members ADD COLUMN IF NOT EXISTS workspace_id TEXT",
+            "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS workspace_id TEXT",
+            "ALTER TABLE meeting_bot_sessions ADD COLUMN IF NOT EXISTS title TEXT",
+            "ALTER TABLE meeting_bot_sessions ADD COLUMN IF NOT EXISTS duration_minutes INTEGER",
+            "ALTER TABLE meeting_bot_sessions ADD COLUMN IF NOT EXISTS bot_account_id TEXT",
+            "ALTER TABLE meeting_bot_sessions ADD COLUMN IF NOT EXISTS calendar_event_id TEXT",
+            "ALTER TABLE meeting_bot_sessions ADD COLUMN IF NOT EXISTS source TEXT",
+        ]
+    else:
+        migrations = [
+            "ALTER TABLE jobs ADD COLUMN user_id TEXT",
+            "ALTER TABLE jobs ADD COLUMN starred INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE users ADD COLUMN timezone TEXT",
+            "ALTER TABLE users ADD COLUMN language TEXT",
+            "ALTER TABLE users ADD COLUMN theme TEXT",
+            "ALTER TABLE team_members ADD COLUMN invite_token TEXT",
+            "ALTER TABLE users ADD COLUMN stripe_customer_id TEXT",
+            "ALTER TABLE users ADD COLUMN stripe_subscription_id TEXT",
+            "ALTER TABLE users ADD COLUMN avatar_url TEXT",
+            # workspaces
+            "CREATE TABLE IF NOT EXISTS workspaces (id TEXT PRIMARY KEY, name TEXT NOT NULL, owner_id TEXT NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)",
+            "ALTER TABLE team_members ADD COLUMN workspace_id TEXT",
+            "ALTER TABLE jobs ADD COLUMN workspace_id TEXT",
+            "CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, job_id TEXT NOT NULL, workspace_id TEXT, title TEXT NOT NULL, owner_name TEXT, assignee_id TEXT, status TEXT NOT NULL DEFAULT 'todo', deadline TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)",
+            "CREATE TABLE IF NOT EXISTS notifications (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, type TEXT NOT NULL, title TEXT NOT NULL, body TEXT, link TEXT, read INTEGER NOT NULL DEFAULT 0, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)",
+            "CREATE TABLE IF NOT EXISTS meeting_bot_sessions (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, workspace_id TEXT, platform TEXT NOT NULL, meeting_url TEXT NOT NULL, title TEXT, bot_name TEXT NOT NULL DEFAULT 'MinuteAI Recorder', status TEXT NOT NULL DEFAULT 'queued', scheduled_for DATETIME, duration_minutes INTEGER, started_at DATETIME, ended_at DATETIME, failure_reason TEXT, recording_path TEXT, job_id TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)",
+            "ALTER TABLE meeting_bot_sessions ADD COLUMN title TEXT",
+            "ALTER TABLE meeting_bot_sessions ADD COLUMN duration_minutes INTEGER",
+            "ALTER TABLE meeting_bot_sessions ADD COLUMN bot_account_id TEXT",
+            "ALTER TABLE meeting_bot_sessions ADD COLUMN calendar_event_id TEXT",
+            "ALTER TABLE meeting_bot_sessions ADD COLUMN source TEXT",
+            "CREATE TABLE IF NOT EXISTS bot_accounts (id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL UNIQUE, email TEXT NOT NULL UNIQUE, display_name TEXT NOT NULL DEFAULT 'MinuteAI Recorder', profile_dir TEXT NOT NULL, provider TEXT NOT NULL DEFAULT 'google', status TEXT NOT NULL DEFAULT 'needs_setup', kind TEXT NOT NULL DEFAULT 'dedicated', created_at DATETIME DEFAULT CURRENT_TIMESTAMP)",
+            "CREATE TABLE IF NOT EXISTS admin_grants (id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, created_by_id TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)",
+            "CREATE TABLE IF NOT EXISTS promo_codes (id TEXT PRIMARY KEY, code TEXT NOT NULL UNIQUE, description TEXT, discount_type TEXT NOT NULL DEFAULT 'percent', discount_value INTEGER NOT NULL DEFAULT 0, active INTEGER NOT NULL DEFAULT 1, max_uses INTEGER, uses_count INTEGER NOT NULL DEFAULT 0, expires_at DATETIME, created_by_id TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)",
+            "CREATE TABLE IF NOT EXISTS promo_code_redemptions (id TEXT PRIMARY KEY, promo_code_id TEXT NOT NULL, user_id TEXT, checkout_session_id TEXT NOT NULL UNIQUE, subscription_id TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)",
+        ]
     with engine.connect() as conn:
         for sql in migrations:
-            try:
-                conn.execute(text(sql))
-                conn.commit()
-            except Exception:
-                pass  # column/table already exists
+            _apply_migration(conn, sql)
     _migrate_tasks_job_id_nullable()
 
 
