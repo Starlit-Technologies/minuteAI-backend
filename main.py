@@ -2,6 +2,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import asyncio
+import os
 from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -31,15 +32,32 @@ from services.meeting_bots.calendar_sync import start_calendar_sync_loop
 
 app = FastAPI(title="MinuteAI API", version="1.0.0")
 
+DEFAULT_CORS_ORIGINS = [
+    "http://localhost:5173",
+    "http://localhost:5174",
+    "http://localhost:5175",
+    "http://localhost:4175",
+    "https://minuteai.vercel.app",
+    "https://minuteai-frontend.onrender.com",
+    "https://minuteai-admin.onrender.com",
+]
+
+
+def cors_origins():
+    configured = [
+        origin.strip().rstrip("/")
+        for origin in os.environ.get("CORS_ORIGINS", "").split(",")
+        if origin.strip()
+    ]
+    app_url = os.environ.get("APP_URL", "").strip().rstrip("/")
+    if app_url:
+        configured.append(app_url)
+    return list(dict.fromkeys(DEFAULT_CORS_ORIGINS + configured))
+
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://localhost:5174",
-        "http://localhost:5175",
-        "http://localhost:4175",
-        "https://minuteai.vercel.app",
-    ],
+    allow_origins=cors_origins(),
     allow_methods=["*"],
     allow_headers=["*"],
 )
