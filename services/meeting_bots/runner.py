@@ -327,15 +327,19 @@ async def _detect_google_meet_block(page) -> Optional[str]:
 # ── Zoom helpers ──────────────────────────────────────────────────────────────
 
 async def _zoom_click_join_from_browser(page, session_id: str):
-    """Click the 'Join from Your Browser' link on Zoom's launcher page."""
+    """Click the 'Join from browser' button on Zoom's launcher page."""
     _log(session_id, f"Zoom launcher — title: {await page.title()} url: {page.url}")
     selectors = [
+        # Current Zoom web UI (button, not anchor)
+        "button:has-text('Join from browser')",
+        "button:has-text('Join from Browser')",
+        "button:has-text('Join from Your Browser')",
+        ".zoom-button--secondary:has-text('Join')",
+        # Legacy anchor-based UI
         "a#btnBrowserJoin",
-        "#btnBrowserJoin",
         "a#btnWebClient",
         "a[href*='wc/join']",
-        "a:has-text('Join from Your Browser')",
-        "a:has-text('join from your browser')",
+        "a:has-text('Join from')",
         "[data-testid='join-from-browser']",
     ]
     for attempt in range(3):
@@ -343,13 +347,13 @@ async def _zoom_click_join_from_browser(page, session_id: str):
             with suppress(Exception):
                 elem = page.locator(selector).first
                 if await elem.is_visible(timeout=3000):
-                    _log(session_id, f"Clicking browser join link: {selector}")
+                    _log(session_id, f"Clicking browser join: {selector}")
                     await elem.click()
                     await page.wait_for_load_state("domcontentloaded", timeout=15000)
                     await page.wait_for_timeout(2500)
                     _log(session_id, f"After browser join click — url: {page.url}")
                     return
-        _log(session_id, f"Browser join link not found (attempt {attempt + 1}/3), waiting...")
+        _log(session_id, f"Browser join not found (attempt {attempt + 1}/3), waiting...")
         await page.wait_for_timeout(3000)
 
 
