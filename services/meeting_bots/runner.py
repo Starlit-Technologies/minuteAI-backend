@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import os
+import re
 import subprocess
 import threading
 import time
@@ -212,35 +213,65 @@ async def _maybe_turn_off_google_meet_av(page):
             await page.get_by_role("button", name=label).click(timeout=1500)
 
 
-async def _prepare_google_meet(page, meeting_url: str, bot_name: str):
+async def _prepare_google_meet(page, meeting_url: str, bot_name: str, session_id: str):
     await page.goto(meeting_url, wait_until="domcontentloaded", timeout=60000)
-    await page.wait_for_timeout(2500)
+    await page.wait_for_timeout(4000)
+    _log(session_id, f"Google Meet page loaded — title: {await page.title()} url: {page.url}")
     await _dismiss_google_meet_prejoin(page)
     await _maybe_turn_off_google_meet_av(page)
 
-    # Fill in guest name — always present when not signed in
-    for selector in [
+    name_selectors = [
         'input[aria-label="Your name"]',
         'input[placeholder="Your name"]',
+        'input[jsname="YPqjbf"]',
         'input[aria-label*="name" i]',
+        'input[placeholder*="name" i]',
         'input[type="text"]',
-    ]:
+    ]
+    for selector in name_selectors:
         with suppress(Exception):
             field = page.locator(selector).first
-            if await field.is_visible(timeout=2000):
-                await field.click()
+            if await field.is_visible(timeout=3000):
+                await field.triple_click()
                 await field.fill(bot_name)
+                await field.press("Tab")
+                await page.wait_for_timeout(800)
+                _log(session_id, f"Filled guest name using selector: {selector}")
                 return
+    _log(session_id, "Warning: could not find name input — page may require sign-in")
 
 
 async def _join_google_meet(page, session_id: str):
-    for label in ["Ask to join", "Join now", "Request to join", "Join meeting"]:
+    await page.wait_for_timeout(1500)
+
+    # Role-based (most reliable when text is known)
+    for label in ["Ask to join", "Join now", "Request to join", "Join meeting", "Join"]:
         with suppress(Exception):
-            button = page.get_by_role("button", name=label)
-            await button.click(timeout=2000)
+            btn = page.get_by_role("button", name=label, exact=False).first
+            if await btn.is_visible(timeout=3000):
+                await btn.click(timeout=3000)
+                _status(session_id, "joining")
+                return
+
+    # jsname fallbacks (Google Meet internal attributes)
+    for jsname in ["Qx7uuf", "d8E3Dd", "V5AQZE"]:
+        with suppress(Exception):
+            btn = page.locator(f"[jsname='{jsname}']").first
+            if await btn.is_visible(timeout=1500):
+                await btn.click()
+                _status(session_id, "joining")
+                return
+
+    # Any button whose visible text contains "join" (case-insensitive)
+    with suppress(Exception):
+        btn = page.locator("button").filter(has_text=re.compile(r"join", re.IGNORECASE)).first
+        if await btn.is_visible(timeout=2000):
+            await btn.click()
             _status(session_id, "joining")
             return
-    raise RuntimeError("Could not find the Google Meet join button.")
+
+    title = await page.title()
+    raise RuntimeError(f"Could not find the Google Meet join button. Page title: '{title}' url: {page.url}")
 
 
 async def _detect_google_meet_block(page) -> Optional[str]:
@@ -253,49 +284,51 @@ async def _detect_google_meet_block(page) -> Optional[str]:
 
 # ── Zoom helpers ──────────────────────────────────────────────────────────────
 
-async def _zoom_click_join_from_browser(page):
+async def _zoom_click_join_from_browser(page, session_id: str):
     """Click the 'Join from Your Browser' link on Zoom's launcher page."""
+    _log(session_id, f"Zoom launcher — title: {await page.title()} url: {page.url}")
     selectors = [
         "a#btnBrowserJoin",
-        "a.join-from-browser",
+        "#btnBrowserJoin",
+        "a#btnWebClient",
+        "a[href*='wc/join']",
         "a:has-text('Join from Your Browser')",
         "a:has-text('join from your browser')",
         "[data-testid='join-from-browser']",
     ]
-    for selector in selectors:
-        with suppress(Exception):
-            elem = page.locator(selector).first
-            if await elem.is_visible(timeout=3000):
-                await elem.click()
-                await page.wait_for_timeout(2500)
-                return
-    # Sometimes appears after a short delay — one more attempt
-    await page.wait_for_timeout(3000)
-    for selector in selectors:
-        with suppress(Exception):
-            elem = page.locator(selector).first
-            if await elem.is_visible(timeout=2000):
-                await elem.click()
-                await page.wait_for_timeout(2000)
-                return
+    for attempt in range(3):
+        for selector in selectors:
+            with suppress(Exception):
+                elem = page.locator(selector).first
+                if await elem.is_visible(timeout=3000):
+                    _log(session_id, f"Clicking browser join link: {selector}")
+                    await elem.click()
+                    await page.wait_for_load_state("domcontentloaded", timeout=15000)
+                    await page.wait_for_timeout(2500)
+                    _log(session_id, f"After browser join click — url: {page.url}")
+                    return
+        _log(session_id, f"Browser join link not found (attempt {attempt + 1}/3), waiting...")
+        await page.wait_for_timeout(3000)
 
 
-async def _zoom_fill_name(page, bot_name: str):
+async def _zoom_fill_name(page, bot_name: str, session_id: str):
     selectors = [
         "#inputname",
         'input[name="inputname"]',
         'input[aria-label="Your Name"]',
         'input[placeholder="Your Name"]',
-        'input[placeholder="Enter your name"]',
+        'input[placeholder*="name" i]',
         'input[type="text"]',
     ]
     for selector in selectors:
         with suppress(Exception):
             field = page.locator(selector).first
-            if await field.is_visible(timeout=3000):
+            if await field.is_visible(timeout=4000):
                 await field.triple_click()
                 await field.fill(bot_name)
+                _log(session_id, f"Filled name using selector: {selector}")
                 return
+    _log(session_id, f"Warning: name input not found — url: {page.url}")
 
 
 async def _zoom_click_join_button(page, session_id: str):
@@ -304,32 +337,40 @@ async def _zoom_click_join_button(page, session_id: str):
         "button#joinBtn",
         'button[data-testid="join-btn"]',
         "button.preview-join-button",
-        "button:has-text('Join')",
+        "button.btn-join",
     ]
     for selector in selectors:
         with suppress(Exception):
             btn = page.locator(selector).first
+            if await btn.is_visible(timeout=3000):
+                await btn.click()
+                _status(session_id, "joining")
+                return
+    for label in ["Join", "Join Meeting", "Join Audio by Computer"]:
+        with suppress(Exception):
+            btn = page.get_by_role("button", name=label, exact=False).first
             if await btn.is_visible(timeout=2000):
                 await btn.click()
                 _status(session_id, "joining")
                 return
-    # Fall back to role-based
-    for label in ["Join", "Join Meeting", "Join Audio by Computer"]:
-        with suppress(Exception):
-            btn = page.get_by_role("button", name=label, exact=False).first
-            if await btn.is_visible(timeout=1500):
-                await btn.click()
-                _status(session_id, "joining")
-                return
-    raise RuntimeError("Could not find the Zoom join button.")
+    # Any button with "join" text
+    with suppress(Exception):
+        btn = page.locator("button").filter(has_text=re.compile(r"join", re.IGNORECASE)).first
+        if await btn.is_visible(timeout=2000):
+            await btn.click()
+            _status(session_id, "joining")
+            return
+
+    title = await page.title()
+    raise RuntimeError(f"Could not find the Zoom join button. Page title: '{title}' url: {page.url}")
 
 
 async def _prepare_and_join_zoom(page, meeting_url: str, bot_name: str, session_id: str):
     await page.goto(meeting_url, wait_until="domcontentloaded", timeout=60000)
-    await page.wait_for_timeout(2000)
-    await _zoom_click_join_from_browser(page)
-    await _zoom_fill_name(page, bot_name)
-    await page.wait_for_timeout(500)
+    await page.wait_for_timeout(2500)
+    await _zoom_click_join_from_browser(page, session_id)
+    await _zoom_fill_name(page, bot_name, session_id)
+    await page.wait_for_timeout(800)
     await _zoom_click_join_button(page, session_id)
 
 
@@ -473,7 +514,7 @@ async def _run_playwright_session(ctx: BotRunContext):
                 await _take_debug_screenshot(page, ctx.session_id, "landing")
 
                 if ctx.platform == "google_meet":
-                    await _prepare_google_meet(page, ctx.meeting_url, ctx.bot_name)
+                    await _prepare_google_meet(page, ctx.meeting_url, ctx.bot_name, ctx.session_id)
                     await _take_debug_screenshot(page, ctx.session_id, "prejoin")
                     await _join_google_meet(page, ctx.session_id)
                 elif ctx.platform == "zoom":
