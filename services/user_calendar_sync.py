@@ -82,7 +82,7 @@ def _valid_token(account: ConnectedAccount) -> Optional[str]:
 
 def _user_workspace(user_id: str) -> Optional[str]:
     from models.user import Workspace
-    from models.database import SessionLocal
+    from db.base import SessionLocal
     with SessionLocal() as db:
         ws = db.query(Workspace).filter(Workspace.owner_id == user_id).first()
         return ws.id if ws else None

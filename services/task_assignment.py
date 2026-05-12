@@ -2,7 +2,9 @@ import json
 import uuid
 from collections import defaultdict
 
-from models.database import SessionLocal, TaskRecord, JobRecord
+from db.base import SessionLocal
+from models.task import TaskRecord
+from models.job import JobRecord
 from models.user import User, Workspace, TeamMember
 from services.notifications import create_notification
 

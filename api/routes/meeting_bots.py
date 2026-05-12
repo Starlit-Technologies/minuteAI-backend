@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from api.deps import get_current_user, get_db
+from middleware.auth import get_current_user, get_db
 from models.bot_account import ensure_workspace_bot_account
 from models.meeting_bot import (
     create_session,
@@ -264,6 +264,17 @@ def end_meeting_bot_session(
         raise HTTPException(status_code=404, detail="Meeting bot session not found.")
     if session.status in {"completed", "failed", "cancelled"}:
         return _serialize(session)
+
+    # If already stuck in "processing" with no job and no recording, the bot
+    # thread is gone — move it to failed so the UI doesn't hang indefinitely.
+    if session.status == "processing" and not session.job_id and not session.recording_path:
+        updated = update_session(
+            session_id,
+            status="failed",
+            ended_at=datetime.utcnow(),
+            failure_reason="Recording ended without capturing audio — the bot may have crashed or lost connection.",
+        )
+        return _serialize(updated)
 
     updated = update_session(
         session_id,

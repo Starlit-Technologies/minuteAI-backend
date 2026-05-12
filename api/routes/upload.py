@@ -7,7 +7,7 @@ from typing import Optional
 import aiofiles
 from fastapi import APIRouter, Depends, UploadFile, File, Form, HTTPException
 
-from api.deps import get_optional_user
+from middleware.auth import get_optional_user
 from models.job import Job, store
 from models.user import User
 from services.processing_pipeline import start_pipeline

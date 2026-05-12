@@ -4,7 +4,34 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
 
-from models.database import MeetingBotSessionRecord, SessionLocal
+from sqlalchemy import Column, String, Text, Integer, DateTime, func
+
+from db.base import Base, SessionLocal
+
+
+class MeetingBotSessionRecord(Base):
+    __tablename__ = "meeting_bot_sessions"
+
+    id             = Column(String,  primary_key=True)
+    user_id        = Column(String,  nullable=False, index=True)
+    workspace_id   = Column(String,  nullable=True, index=True)
+    bot_account_id = Column(String,  nullable=True, index=True)
+    calendar_event_id = Column(String, nullable=True, index=True)
+    source         = Column(String,  nullable=True)
+    platform       = Column(String,  nullable=False)
+    meeting_url    = Column(Text,    nullable=False)
+    title          = Column(Text,    nullable=True)
+    bot_name       = Column(String,  nullable=False, default="MinuteAI Recorder")
+    status         = Column(String,  nullable=False, default="queued", index=True)
+    scheduled_for  = Column(DateTime, nullable=True)
+    duration_minutes = Column(Integer, nullable=True)
+    started_at     = Column(DateTime, nullable=True)
+    ended_at       = Column(DateTime, nullable=True)
+    failure_reason = Column(Text,    nullable=True)
+    recording_path = Column(String,  nullable=True)
+    job_id         = Column(String,  nullable=True, index=True)
+    logs_json      = Column(Text,    nullable=True)
+    created_at     = Column(DateTime, server_default=func.now())
 
 
 @dataclass

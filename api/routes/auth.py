@@ -1,55 +1,16 @@
-from fastapi import APIRouter, Depends, Body
-from pydantic import BaseModel, EmailStr, Field
+from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
-from api.deps import get_db, get_current_user
+from middleware.auth import get_db, get_current_user
 from models.user import User
+from schemas.auth import (
+    ForgotPasswordIn, GoogleAuthIn, LoginIn, RefreshIn,
+    RegisterIn, ResendOTPIn, ResetPasswordIn, VerifyEmailIn,
+)
 import services.auth as svc
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
-
-# ── request / response schemas ────────────────────────────────────────────────
-
-class RegisterIn(BaseModel):
-    name: str = Field(..., min_length=2, max_length=100)
-    email: EmailStr
-    password: str = Field(..., min_length=8)
-
-
-class LoginIn(BaseModel):
-    email: EmailStr
-    password: str
-
-
-class VerifyEmailIn(BaseModel):
-    user_id: str
-    code: str = Field(..., min_length=6, max_length=6)
-
-
-class ResendOTPIn(BaseModel):
-    user_id: str
-    type: str = "verify_email"
-
-
-class RefreshIn(BaseModel):
-    refresh_token: str
-
-class GoogleAuthIn(BaseModel):
-    access_token: str
-
-
-class ForgotPasswordIn(BaseModel):
-    email: EmailStr
-
-
-class ResetPasswordIn(BaseModel):
-    user_id: str
-    code: str = Field(..., min_length=6, max_length=6)
-    new_password: str = Field(..., min_length=8)
-
-
-# ── endpoints ─────────────────────────────────────────────────────────────────
 
 @router.post("/register", status_code=201)
 def register(body: RegisterIn, db: Session = Depends(get_db)):
@@ -100,4 +61,5 @@ def me(current_user: User = Depends(get_current_user)):
         "plan":           current_user.plan,
         "email_verified": current_user.email_verified,
         "avatar_url":     current_user.avatar_url,
+        "last_login_at":  current_user.last_login_at.isoformat() if current_user.last_login_at else None,
     }

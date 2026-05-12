@@ -19,14 +19,15 @@ from api.routes.results import router as results_router
 from api.routes.download import router as download_router
 from api.routes.ws import router as ws_router, manager
 from api.routes.workspaces import router as workspaces_router
-from api.routes.tasks         import router as tasks_router
+from api.routes.tasks import router as tasks_router
 from api.routes.notifications import router as notifications_router
 from api.routes.admin import router as admin_router
 from api.routes.meeting_bots import router as meeting_bots_router
 from api.routes.translate import router as translate_router
 from api.routes.integrations import router as integrations_router
+
 from models.job import store
-from models.database import create_tables, run_migrations, recover_stuck_jobs, seed_default_workspaces
+from db.init_db import create_tables, run_migrations, recover_stuck_jobs, recover_stuck_bot_sessions, seed_default_workspaces
 from models.bot_account import ensure_bot_accounts_for_all_workspaces
 from models.meeting_bot import recover_processing_sessions
 from services.meeting_bots.runner import start_pending_meeting_bot_sessions
@@ -86,13 +87,15 @@ app.include_router(ws_router)
 
 @app.on_event("startup")
 async def startup():
-    for d in ["storage/uploads", "storage/outputs", "storage/chunks", "storage/avatars", "storage/meeting_bot_debug", "storage/meeting_bot_captures"]:
+    for d in ["storage/uploads", "storage/outputs", "storage/chunks", "storage/avatars",
+              "storage/meeting_bot_debug", "storage/meeting_bot_captures"]:
         Path(d).mkdir(parents=True, exist_ok=True)
     create_tables()
     run_migrations()
     seed_default_workspaces()
     ensure_bot_accounts_for_all_workspaces()
     recover_stuck_jobs()
+    recover_stuck_bot_sessions()
     recover_processing_sessions()
     manager.set_loop(asyncio.get_event_loop())
     store.set_notify(manager.notify)

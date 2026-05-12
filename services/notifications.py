@@ -1,5 +1,6 @@
 import uuid
-from models.database import SessionLocal, NotificationRecord
+from db.base import SessionLocal
+from models.notification import NotificationRecord
 
 
 def create_notification(

@@ -5,8 +5,24 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from models.database import BotAccountRecord, SessionLocal
+from sqlalchemy import Column, String, DateTime, func
+
+from db.base import Base, SessionLocal
 from models.user import Workspace
+
+
+class BotAccountRecord(Base):
+    __tablename__ = "bot_accounts"
+
+    id           = Column(String, primary_key=True)
+    workspace_id = Column(String, nullable=False, unique=True, index=True)
+    email        = Column(String, nullable=False, unique=True, index=True)
+    display_name = Column(String, nullable=False, default="MinuteAI Recorder")
+    profile_dir  = Column(String, nullable=False)
+    provider     = Column(String, nullable=False, default="google")
+    status       = Column(String, nullable=False, default="needs_setup", index=True)
+    kind         = Column(String, nullable=False, default="dedicated")
+    created_at   = Column(DateTime, server_default=func.now())
 
 
 BOT_EMAIL_DOMAIN = os.environ.get("MEETING_BOT_EMAIL_DOMAIN", "bots.minuteai.local").strip() or "bots.minuteai.local"

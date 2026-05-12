@@ -196,8 +196,14 @@ def _current_status(session_id: str) -> Optional[str]:
 
 
 def _capture_has_audio_stream(media_path: str) -> bool:
-    result = subprocess.run([FFMPEG, "-i", media_path, "-f", "null", "-"], capture_output=True, text=True)
-    return "Audio:" in (result.stderr or "")
+    try:
+        result = subprocess.run(
+            [FFMPEG, "-i", media_path, "-f", "null", "-"],
+            capture_output=True, text=True, timeout=30,
+        )
+        return "Audio:" in (result.stderr or "")
+    except subprocess.TimeoutExpired:
+        return False
 
 
 # ── Audio helpers ─────────────────────────────────────────────────────────────
@@ -241,9 +247,15 @@ async def _take_debug_screenshot(page, session_id: str, label: str) -> str:
 # ── Google Meet helpers ───────────────────────────────────────────────────────
 
 async def _dismiss_google_meet_prejoin(page):
-    for label in ["Continue without microphone", "Continue without camera", "Dismiss", "Got it"]:
+    # "Got it" dismisses the "Sign in with your Google account" tooltip
+    for label in ["Got it", "Continue without microphone", "Continue without camera", "Dismiss"]:
         with suppress(Exception):
-            await page.get_by_role("button", name=label).click(timeout=1000)
+            await page.get_by_role("button", name=label, exact=True).click(timeout=1500)
+            await page.wait_for_timeout(400)
+    # Text-based fallback in case role detection misses it
+    with suppress(Exception):
+        await page.locator("button", has_text="Got it").first.click(timeout=1000)
+        await page.wait_for_timeout(400)
 
 
 async def _maybe_turn_off_google_meet_av(page):
@@ -255,62 +267,132 @@ async def _maybe_turn_off_google_meet_av(page):
             await page.get_by_role("button", name=label).click(timeout=1500)
 
 
-async def _prepare_google_meet(page, meeting_url: str, bot_name: str, session_id: str):
-    await page.goto(meeting_url, wait_until="domcontentloaded", timeout=60000)
-    await page.wait_for_timeout(4000)
-    _log(session_id, f"Google Meet page loaded — title: {await page.title()} url: {page.url}")
-    await _dismiss_google_meet_prejoin(page)
-    await _maybe_turn_off_google_meet_av(page)
-
-    name_selectors = [
+# JS used as the primary fill strategy: bypasses Playwright visibility/interactability
+# checks and works regardless of attribute differences in headless mode.
+_FILL_NAME_JS = """
+(name) => {
+    const candidates = [
+        'input[jsname="YPqjbf"]',
         'input[aria-label="Your name"]',
         'input[placeholder="Your name"]',
-        'input[jsname="YPqjbf"]',
         'input[aria-label*="name" i]',
         'input[placeholder*="name" i]',
         'input[type="text"]',
-    ]
-    for selector in name_selectors:
+        'input:not([type])',
+    ];
+    const setter = Object.getOwnPropertyDescriptor(
+        window.HTMLInputElement.prototype, 'value'
+    ).set;
+    for (const sel of candidates) {
+        const el = document.querySelector(sel);
+        if (el) {
+            setter.call(el, name);
+            el.dispatchEvent(new Event('input',  { bubbles: true }));
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+            el.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true }));
+            el.focus();
+            return sel;
+        }
+    }
+    // Last resort: any visible input by bounding rect
+    for (const el of document.querySelectorAll('input')) {
+        const r = el.getBoundingClientRect();
+        if (r.width > 50 && r.height > 10) {
+            setter.call(el, name);
+            el.dispatchEvent(new Event('input',  { bubbles: true }));
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+            el.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true }));
+            el.focus();
+            return 'input[rect-fallback]';
+        }
+    }
+    return null;
+}
+"""
+
+
+async def _prepare_google_meet(page, meeting_url: str, bot_name: str, session_id: str):
+    await page.goto(meeting_url, wait_until="domcontentloaded", timeout=60000)
+    await page.wait_for_timeout(5000)
+    _log(session_id, f"Google Meet page loaded — title: {await page.title()} url: {page.url}")
+    await _dismiss_google_meet_prejoin(page)
+    await _maybe_turn_off_google_meet_av(page)
+    await page.wait_for_timeout(1500)
+
+    # Primary: JavaScript fill (works regardless of Playwright visibility detection)
+    with suppress(Exception):
+        matched = await page.evaluate(_FILL_NAME_JS, bot_name)
+        if matched:
+            await page.wait_for_timeout(1500)
+            _log(session_id, f"Filled guest name via JS ({matched})")
+            return
+
+    # Playwright fallback
+    for selector in [
+        'input[jsname="YPqjbf"]',
+        'input[aria-label="Your name"]',
+        'input[placeholder="Your name"]',
+        'input[aria-label*="name" i]',
+        'input[placeholder*="name" i]',
+        'input[type="text"]',
+    ]:
         with suppress(Exception):
             field = page.locator(selector).first
             if await field.is_visible(timeout=3000):
                 await field.triple_click()
                 await field.fill(bot_name)
+                await field.dispatch_event("input")
+                await field.dispatch_event("change")
                 await field.press("Tab")
-                await page.wait_for_timeout(800)
+                await page.wait_for_timeout(1500)
                 _log(session_id, f"Filled guest name using selector: {selector}")
                 return
+
     _log(session_id, "Warning: could not find name input — page may require sign-in")
 
 
 async def _join_google_meet(page, session_id: str):
-    await page.wait_for_timeout(1500)
+    # Extra wait so Google Meet finishes enabling the join button after name fill
+    await page.wait_for_timeout(2000)
 
-    # Role-based (most reliable when text is known)
+    async def _try_click(btn) -> bool:
+        """Click btn if visible; use JS-click if disabled (name-fill may not re-enable via Playwright)."""
+        if not await btn.is_visible(timeout=2000):
+            return False
+        enabled = await btn.is_enabled(timeout=500)
+        if enabled:
+            await btn.click(timeout=3000)
+        else:
+            # Attempt JS click — Google Meet sometimes responds even to programmatic clicks
+            await btn.evaluate("el => el.click()")
+        _status(session_id, "joining")
+        return True
+
+    # Role-based (most reliable when text is stable)
     for label in ["Ask to join", "Join now", "Request to join", "Join meeting", "Join"]:
         with suppress(Exception):
             btn = page.get_by_role("button", name=label, exact=False).first
-            if await btn.is_visible(timeout=3000):
-                await btn.click(timeout=3000)
-                _status(session_id, "joining")
+            if await _try_click(btn):
                 return
 
-    # jsname fallbacks (Google Meet internal attributes)
-    for jsname in ["Qx7uuf", "d8E3Dd", "V5AQZE"]:
+    # jsname fallbacks — only real button jsnames, NOT container divs.
+    # w5gBed  = "Ask to join" button (confirmed from live Meet lobby HTML)
+    # d8E3Dd  = older "Join now" button seen in some Meet variants
+    # V5AQZE  = legacy join button
+    for jsname in ["w5gBed", "d8E3Dd", "V5AQZE"]:
         with suppress(Exception):
-            btn = page.locator(f"[jsname='{jsname}']").first
-            if await btn.is_visible(timeout=1500):
-                await btn.click()
-                _status(session_id, "joining")
+            btn = page.locator(f"button[jsname='{jsname}']").first
+            if await _try_click(btn):
                 return
 
-    # Any button whose visible text contains "join" (case-insensitive)
+    # Walk all buttons whose text contains "join"
     with suppress(Exception):
-        btn = page.locator("button").filter(has_text=re.compile(r"join", re.IGNORECASE)).first
-        if await btn.is_visible(timeout=2000):
-            await btn.click()
-            _status(session_id, "joining")
-            return
+        btns = page.locator("button").filter(has_text=re.compile(r"join", re.IGNORECASE))
+        count = await btns.count()
+        for i in range(count):
+            btn = btns.nth(i)
+            if await _try_click(btn):
+                return
 
     title = await page.title()
     raise RuntimeError(f"Could not find the Google Meet join button. Page title: '{title}' url: {page.url}")
@@ -326,11 +408,56 @@ async def _detect_google_meet_block(page) -> Optional[str]:
 
 # ── Zoom helpers ──────────────────────────────────────────────────────────────
 
+_ZOOM_FILL_NAME_JS = """
+(name) => {
+    const candidates = [
+        '#input-for-name',
+        '#inputname',
+        'input[name="inputname"]',
+        'input[aria-label="Your Name"]',
+        'input[placeholder="Your Name"]',
+        'input[placeholder*="name" i]',
+        'input[type="text"]',
+    ];
+    const setter = Object.getOwnPropertyDescriptor(
+        window.HTMLInputElement.prototype, 'value'
+    ).set;
+    for (const sel of candidates) {
+        const el = document.querySelector(sel);
+        if (el) {
+            setter.call(el, name);
+            el.dispatchEvent(new Event('input',  { bubbles: true }));
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+            el.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true }));
+            el.focus();
+            return sel;
+        }
+    }
+    return null;
+}
+"""
+
+
+def _zoom_is_in_meeting_url(page) -> bool:
+    """True if the URL has moved past the /join page into the actual meeting."""
+    return "/wc/" in page.url and "/join" not in page.url
+
+
 async def _zoom_click_join_from_browser(page, session_id: str):
     """Click the 'Join from browser' button on Zoom's launcher page."""
     _log(session_id, f"Zoom launcher — title: {await page.title()} url: {page.url}")
+
+    # Wait for the launcher to render before searching.
+    # "Join from browser" is always the secondary (outline) button; the primary is the app button.
+    with suppress(Exception):
+        await page.wait_for_selector(
+            "button.zoom-button--secondary, button:has-text('Join from browser'), a#btnBrowserJoin",
+            timeout=12000,
+        )
+
     selectors = [
-        # Current Zoom web UI (button, not anchor)
+        # From live HTML: secondary outline button = "Join from browser"
+        "button.zoom-button--secondary",
         "button:has-text('Join from browser')",
         "button:has-text('Join from Browser')",
         "button:has-text('Join from Your Browser')",
@@ -346,11 +473,11 @@ async def _zoom_click_join_from_browser(page, session_id: str):
         for selector in selectors:
             with suppress(Exception):
                 elem = page.locator(selector).first
-                if await elem.is_visible(timeout=3000):
+                if await elem.is_visible(timeout=2000):
                     _log(session_id, f"Clicking browser join: {selector}")
                     await elem.click()
                     await page.wait_for_load_state("domcontentloaded", timeout=15000)
-                    await page.wait_for_timeout(2500)
+                    await page.wait_for_timeout(3000)
                     _log(session_id, f"After browser join click — url: {page.url}")
                     return
         _log(session_id, f"Browser join not found (attempt {attempt + 1}/3), waiting...")
@@ -358,62 +485,113 @@ async def _zoom_click_join_from_browser(page, session_id: str):
 
 
 async def _zoom_fill_name(page, bot_name: str, session_id: str):
-    selectors = [
-        "#inputname",
-        'input[name="inputname"]',
-        'input[aria-label="Your Name"]',
-        'input[placeholder="Your Name"]',
-        'input[placeholder*="name" i]',
-        'input[type="text"]',
-    ]
-    for selector in selectors:
+    # Use the frame-aware finder so we don't miss inputs inside child frames
+    frame, field = await _zoom_find_name_field(page)
+    if field:
         with suppress(Exception):
-            field = page.locator(selector).first
-            if await field.is_visible(timeout=4000):
-                await field.triple_click()
-                await field.fill(bot_name)
-                _log(session_id, f"Filled name using selector: {selector}")
-                return
+            await field.triple_click()
+            await field.fill(bot_name)
+            await field.dispatch_event("input")
+            await field.dispatch_event("change")
+            await field.dispatch_event("keyup")
+            _log(session_id, "Filled Zoom name via frame-aware locator")
+            return
+
+    # JS fallback (main frame only)
+    with suppress(Exception):
+        matched = await page.evaluate(_ZOOM_FILL_NAME_JS, bot_name)
+        if matched:
+            await page.wait_for_timeout(600)
+            _log(session_id, f"Filled Zoom name via JS ({matched})")
+            return
+
     _log(session_id, f"Warning: name input not found — url: {page.url}")
 
 
 async def _zoom_click_join_button(page, session_id: str):
-    selectors = [
-        "#joinBtn",
-        "button#joinBtn",
-        'button[data-testid="join-btn"]',
-        "button.preview-join-button",
-        "button.btn-join",
-    ]
-    for selector in selectors:
-        with suppress(Exception):
-            btn = page.locator(selector).first
-            if await btn.is_visible(timeout=3000):
-                await btn.click()
-                _status(session_id, "joining")
-                return
-    for label in ["Join", "Join Meeting", "Join Audio by Computer"]:
-        with suppress(Exception):
-            btn = page.get_by_role("button", name=label, exact=False).first
-            if await btn.is_visible(timeout=2000):
-                await btn.click()
-                _status(session_id, "joining")
-                return
-    # Any button with "join" text
-    with suppress(Exception):
-        btn = page.locator("button").filter(has_text=re.compile(r"join", re.IGNORECASE)).first
-        if await btn.is_visible(timeout=2000):
-            await btn.click()
+    # Poll up to 12 s — wait for button to become enabled after name fill.
+    # From live HTML: button.preview-join-button gets zm-btn--disabled removed once name is entered.
+    for attempt in range(12):
+        if _zoom_is_in_meeting_url(page):
+            _log(session_id, "Zoom URL moved to meeting — already joined")
             _status(session_id, "joining")
             return
+
+        # Enabled preview-join-button (no disabled class)
+        with suppress(Exception):
+            btn = page.locator("button.preview-join-button:not(.zm-btn--disabled)").first
+            if await btn.is_visible(timeout=500) and await btn.is_enabled(timeout=300):
+                await btn.click()
+                _status(session_id, "joining")
+                return
+
+        # Any visible enabled join button
+        for selector in ["#joinBtn", "button#joinBtn", 'button[data-testid="join-btn"]', "button.btn-join"]:
+            with suppress(Exception):
+                btn = page.locator(selector).first
+                if await btn.is_visible(timeout=400) and await btn.is_enabled(timeout=200):
+                    await btn.click()
+                    _status(session_id, "joining")
+                    return
+
+        # Also search child frames for the join button
+        for frame in [page] + list(page.frames):
+            for label in ["Join", "Join Meeting"]:
+                with suppress(Exception):
+                    btn = frame.get_by_role("button", name=label, exact=True).first
+                    if await btn.is_visible(timeout=400) and await btn.is_enabled(timeout=200):
+                        await btn.click()
+                        _status(session_id, "joining")
+                        return
+
+        await page.wait_for_timeout(1000)
 
     title = await page.title()
     raise RuntimeError(f"Could not find the Zoom join button. Page title: '{title}' url: {page.url}")
 
 
+async def _zoom_find_name_field(page):
+    """Return (frame, locator) for the name input, searching all frames.
+    Uses get_by_label first (most semantic), then CSS selectors."""
+    all_frames = [page] + list(page.frames)
+    for frame in all_frames:
+        # get_by_label is the most reliable — matches the <label for="input-for-name">Your Name</label>
+        with suppress(Exception):
+            loc = frame.get_by_label("Your Name", exact=False)
+            if await loc.first.is_visible(timeout=300):
+                return frame, loc.first
+        for sel in ["#input-for-name", "#inputname", 'input[type="text"]']:
+            with suppress(Exception):
+                loc = frame.locator(sel).first
+                if await loc.is_visible(timeout=300):
+                    return frame, loc
+    return None, None
+
+
+async def _zoom_wait_for_name_form(page, session_id: str, timeout_seconds: int = 45) -> bool:
+    """Wait until the name input is attached to the DOM (handles long 'Joining Meeting...' loader).
+    Returns True if found, False if URL already moved into the meeting."""
+    _log(session_id, "Waiting for Zoom name form to render…")
+    try:
+        # wait_for_selector with state="attached" just needs the element in the DOM —
+        # no visibility/opacity requirements, so it catches the element as soon as
+        # the React app renders it, even before CSS transitions complete.
+        await page.wait_for_selector(
+            "#input-for-name, #inputname, input[aria-describedby='error-for-name']",
+            state="attached",
+            timeout=timeout_seconds * 1000,
+        )
+        _log(session_id, "Zoom name form found")
+        return True
+    except Exception:
+        if _zoom_is_in_meeting_url(page):
+            return False
+        _log(session_id, "Zoom name form did not appear within timeout")
+        return False
+
+
 async def _prepare_and_join_zoom(page, meeting_url: str, bot_name: str, session_id: str):
     await page.goto(meeting_url, wait_until="domcontentloaded", timeout=60000)
-    # Wait for Cloudflare "Just a moment..." challenge to clear
     with suppress(Exception):
         await page.wait_for_function(
             "() => document.title !== 'Just a moment...'",
@@ -421,6 +599,18 @@ async def _prepare_and_join_zoom(page, meeting_url: str, bot_name: str, session_
         )
     await page.wait_for_timeout(2000)
     await _zoom_click_join_from_browser(page, session_id)
+
+    # Wait for the name form (the "Joining Meeting..." spinner is just a
+    # transition — the form appears after it clears).
+    name_form_visible = await _zoom_wait_for_name_form(page, session_id, timeout_seconds=30)
+
+    if not name_form_visible:
+        if _zoom_is_in_meeting_url(page):
+            _log(session_id, "Zoom URL already in meeting — skipping name/join steps")
+            _status(session_id, "joining")
+            return
+        _log(session_id, "Zoom name form not found — attempting join anyway")
+
     await _zoom_fill_name(page, bot_name, session_id)
     await page.wait_for_timeout(800)
     await _zoom_click_join_button(page, session_id)
@@ -430,7 +620,9 @@ async def _prepare_and_join_zoom(page, meeting_url: str, bot_name: str, session_
 
 async def _wait_for_admission(page, session_id: str, platform: str) -> bool:
     _status(session_id, "waiting_for_host")
-    deadline_seconds = 90 if platform == "google_meet" else 45
+    # Zoom needs a longer window: the "Joining Meeting..." spinner can run for
+    # 30–60 s before the in-meeting UI appears on the headless browser.
+    deadline_seconds = 90 if platform == "google_meet" else 120
 
     for _ in range(deadline_seconds // 3):
         if _current_status(session_id) in {"cancelled", "processing"}:
@@ -450,10 +642,15 @@ async def _wait_for_admission(page, session_id: str, platform: str) -> bool:
                 page.get_by_text("You joined"),
             ]
         else:
+            # Zoom web client (app.zoom.us/wc/) signals for being inside the meeting
             signals = [
                 page.get_by_role("button", name="Leave"),
-                page.get_by_text("Mute"),
+                page.get_by_role("button", name="Mute"),
+                page.get_by_role("button", name="Unmute"),
+                page.get_by_role("button", name="Stop Video"),
+                page.get_by_role("button", name="Start Video"),
                 page.get_by_text("Participants"),
+                page.get_by_text("Chat"),
             ]
 
         for locator in signals:
@@ -632,41 +829,44 @@ async def _run_playwright_session(ctx: BotRunContext):
         if _current_status(ctx.session_id) in {"failed", "cancelled"}:
             return
 
-        audio_path = str(CAPTURE_DIR / f"{ctx.session_id}.webm")
-        if not _save_audio_chunks(audio_chunks, audio_path):
-            _failure(
-                ctx.session_id,
-                "Audio capture produced no data. The meeting may have had no audio, "
-                "or the browser was blocked from processing WebRTC streams.",
-            )
-            return
+        try:
+            audio_path = str(CAPTURE_DIR / f"{ctx.session_id}.webm")
+            if not _save_audio_chunks(audio_chunks, audio_path):
+                _failure(
+                    ctx.session_id,
+                    "Audio capture produced no data. The meeting may have had no audio, "
+                    "or the browser was blocked from processing WebRTC streams.",
+                )
+                return
 
-        if not _capture_has_audio_stream(audio_path):
-            _failure(
+            if not _capture_has_audio_stream(audio_path):
+                _failure(
+                    ctx.session_id,
+                    "Captured file has no audio stream. The WebRTC intercept may not have fired — "
+                    "this can happen if the meeting uses a non-standard audio stack.",
+                    recording_path=audio_path,
+                )
+                return
+
+            _log(ctx.session_id, f"Audio file ready: {audio_path}")
+
+            processing_job_id = create_processing_job_from_media(
+                media_path=audio_path,
+                original_filename=f"{ctx.session_id}.webm",
+                user_id=session.user_id,
+                workspace_id=session.workspace_id,
+            )
+            update_session(
                 ctx.session_id,
-                "Captured file has no audio stream. The WebRTC intercept may not have fired — "
-                "this can happen if the meeting uses a non-standard audio stack.",
+                status="completed",
+                ended_at=datetime.utcnow(),
                 recording_path=audio_path,
+                job_id=processing_job_id,
+                failure_reason=None,
             )
-            return
-
-        _log(ctx.session_id, f"Audio file ready: {audio_path}")
-
-        processing_job_id = create_processing_job_from_media(
-            media_path=audio_path,
-            original_filename=f"{ctx.session_id}.webm",
-            user_id=session.user_id,
-            workspace_id=session.workspace_id,
-        )
-        update_session(
-            ctx.session_id,
-            status="completed",
-            ended_at=datetime.utcnow(),
-            recording_path=audio_path,
-            job_id=processing_job_id,
-            failure_reason=None,
-        )
-        _log(ctx.session_id, f"Processing job created: {processing_job_id}")
+            _log(ctx.session_id, f"Processing job created: {processing_job_id}")
+        except Exception as exc:
+            _failure(ctx.session_id, f"Post-processing error: {exc}")
 
     except Exception as exc:
         _failure(ctx.session_id, f"Session failed before launch: {exc}")

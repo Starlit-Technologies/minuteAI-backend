@@ -1,51 +1,21 @@
 import secrets
-from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, EmailStr
 from sqlalchemy.orm import Session
 
-from api.deps import get_db, get_current_user
+from middleware.auth import get_db, get_current_user
 from models.user import User, TeamMember
+from schemas.team import InviteIn, UpdateRoleIn
 from services.auth_email import send_team_invite
+from services.team import member_dict
 
 router = APIRouter(prefix="/team", tags=["team"])
 
 VALID_ROLES = {"admin", "member", "viewer"}
 
 
-# ── schemas ───────────────────────────────────────────────────────────────────
-
-class InviteIn(BaseModel):
-    email: EmailStr
-    role:  str = "member"
-    name:  Optional[str] = None
-
-class UpdateRoleIn(BaseModel):
-    role: str
-
-
-# ── helpers ───────────────────────────────────────────────────────────────────
-
-def _member_dict(m: TeamMember, linked_user: User | None = None) -> dict:
-    name = linked_user.name if linked_user else (m.name or m.invited_email.split("@")[0].title())
-    initials = "".join(w[0] for w in name.split()[:2]).upper()
-    return {
-        "id":        m.id,
-        "name":      name,
-        "email":     m.invited_email,
-        "role":      m.role,
-        "status":    m.status,
-        "initials":  initials,
-        "joined_at": m.created_at.isoformat() if m.created_at else None,
-    }
-
-
-# ── endpoints ─────────────────────────────────────────────────────────────────
-
 @router.get("/invite/{token}")
 def get_invite(token: str, db: Session = Depends(get_db)):
-    """Public endpoint — no auth required."""
     member = db.query(TeamMember).filter(TeamMember.invite_token == token).first()
     if not member:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Invite not found or has already been used.")
@@ -74,7 +44,7 @@ def list_team(
     result = []
     for m in members:
         linked = db.query(User).filter(User.id == m.user_id).first() if m.user_id else None
-        result.append(_member_dict(m, linked))
+        result.append(member_dict(m, linked))
     return result
 
 
@@ -86,7 +56,6 @@ def invite_member(
 ):
     if body.role not in VALID_ROLES:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Role must be one of: {', '.join(VALID_ROLES)}")
-
     if body.email == current_user.email:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "You cannot invite yourself.")
 
@@ -97,7 +66,6 @@ def invite_member(
     if existing:
         raise HTTPException(status.HTTP_409_CONFLICT, "This person has already been invited.")
 
-    # Link immediately if they already have an account
     linked_user = db.query(User).filter(User.email == body.email).first()
     member = TeamMember(
         owner_id=current_user.id,
@@ -121,7 +89,7 @@ def invite_member(
         has_account=linked_user is not None,
         invite_token=member.invite_token,
     )
-    return _member_dict(member, linked_user)
+    return member_dict(member, linked_user)
 
 
 @router.patch("/{member_id}")

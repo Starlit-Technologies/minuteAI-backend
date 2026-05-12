@@ -5,7 +5,7 @@ import tempfile
 from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException
 import imageio_ffmpeg
 
-from api.deps import get_current_user
+from middleware.auth import get_current_user
 
 router = APIRouter()
 FFMPEG = imageio_ffmpeg.get_ffmpeg_exe()
@@ -35,6 +35,8 @@ def _convert_to_mp3(input_path: str, output_path: str) -> None:
     ]
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
+        import logging
+        logging.getLogger(__name__).warning("ffmpeg failed: %s", result.stderr[-800:] if result.stderr else "no stderr")
         raise HTTPException(status_code=400, detail="Could not process audio — ensure the browser supports WebM/Opus.")
 
 

@@ -3,7 +3,23 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
 
-from models.database import ConnectedAccountRecord, SessionLocal
+from sqlalchemy import Column, String, Text, Boolean, DateTime, func
+
+from db.base import Base, SessionLocal
+
+
+class ConnectedAccountRecord(Base):
+    __tablename__ = "connected_accounts"
+
+    id            = Column(String, primary_key=True)
+    user_id       = Column(String, nullable=False, index=True)
+    provider      = Column(String, nullable=False)
+    access_token  = Column(Text,   nullable=False)
+    refresh_token = Column(Text,   nullable=True)
+    token_expiry  = Column(DateTime, nullable=True)
+    email         = Column(String, nullable=True)
+    auto_join     = Column(Boolean, nullable=False, default=True)
+    created_at    = Column(DateTime, server_default=func.now())
 
 
 @dataclass
@@ -132,7 +148,6 @@ def update_auto_join(user_id: str, provider: str, auto_join: bool) -> Optional[C
 
 
 def list_all_for_sync() -> list[ConnectedAccount]:
-    """Return all connected accounts with auto_join enabled."""
     with SessionLocal() as db:
         records = (
             db.query(ConnectedAccountRecord)

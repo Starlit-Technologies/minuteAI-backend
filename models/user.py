@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 from sqlalchemy import Column, String, Boolean, DateTime, Integer, ForeignKey, func, UniqueConstraint
-from models.database import Base
+from db.base import Base
 
 
 def _uuid():
@@ -23,6 +23,7 @@ class User(Base):
     stripe_customer_id    = Column(String, nullable=True, unique=True, index=True)
     stripe_subscription_id = Column(String, nullable=True)
     avatar_url            = Column(String, nullable=True)
+    last_login_at         = Column(DateTime, nullable=True)
     created_at            = Column(DateTime, server_default=func.now())
     updated_at     = Column(DateTime, server_default=func.now(), onupdate=datetime.utcnow)
 

@@ -65,11 +65,12 @@ def _token_pair(user_id: str) -> dict:
 
 def _user_dict(user: User) -> dict:
     return {
-        "id":         user.id,
-        "name":       user.name,
-        "email":      user.email,
-        "plan":       user.plan,
-        "avatar_url": user.avatar_url,
+        "id":            user.id,
+        "name":          user.name,
+        "email":         user.email,
+        "plan":          user.plan,
+        "avatar_url":    user.avatar_url,
+        "last_login_at": user.last_login_at.isoformat() if user.last_login_at else None,
     }
 
 
@@ -139,6 +140,7 @@ def verify_email(db: Session, user_id: str, code: str) -> dict:
 
     record.used = True
     user.email_verified = True
+    user.last_login_at  = _utcnow()
 
     # Link any pending team invitations sent to this email
     pending_invites = db.query(TeamMember).filter(
@@ -203,6 +205,8 @@ def login(db: Session, email: str, password: str) -> dict:
             "Please verify your email before signing in.",
             headers={"X-User-Id": user.id},
         )
+    user.last_login_at = _utcnow()
+    db.commit()
     return {**_token_pair(user.id), "user": _user_dict(user)}
 
 
@@ -281,7 +285,8 @@ def google_sign_in(db: Session, access_token: str) -> dict:
     if user:
         if avatar_url and not user.avatar_url:
             user.avatar_url = avatar_url
-            db.commit()
+        user.last_login_at = _utcnow()
+        db.commit()
     else:
         user = User(
             name=name,

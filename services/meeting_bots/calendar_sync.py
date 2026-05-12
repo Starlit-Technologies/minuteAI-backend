@@ -11,7 +11,7 @@ from google.oauth2 import service_account
 from google.auth.transport.requests import Request
 
 from models.bot_account import list_bot_accounts
-from models.database import SessionLocal
+from db.base import SessionLocal
 from models.meeting_bot import create_session, get_session_by_calendar_event
 from models.user import Workspace
 from services.meeting_bots.platforms import detect_platform

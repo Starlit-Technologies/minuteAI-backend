@@ -1,10 +1,32 @@
 import json
 import threading
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional, Callable
 
-from models.database import SessionLocal, JobRecord
+from sqlalchemy import Column, String, Text, Boolean, DateTime, func
+
+from db.base import Base, SessionLocal
+
+
+class JobRecord(Base):
+    __tablename__ = "jobs"
+
+    id           = Column(String,  primary_key=True)
+    user_id      = Column(String,  nullable=True, index=True)
+    status       = Column(String,  nullable=False, default="uploading")
+    message      = Column(Text,    nullable=True)
+    email        = Column(String,  nullable=True)
+    audio_path   = Column(String,  nullable=True)
+    transcript   = Column(Text,    nullable=True)
+    minutes_json = Column(Text,    nullable=True)
+    docx_path    = Column(String,  nullable=True)
+    pdf_path     = Column(String,  nullable=True)
+    starred      = Column(Boolean, nullable=False, default=False)
+    workspace_id = Column(String,  nullable=True, index=True)
+    config_json  = Column(Text,    nullable=True)
+    created_at   = Column(DateTime, server_default=func.now())
 
 
 @dataclass
@@ -21,7 +43,7 @@ class Job:
     pdf_path: Optional[str] = None
     starred: bool = False
     workspace_id: Optional[str] = None
-    job_config: Optional[dict] = None   # meeting type, template, attendees, etc.
+    job_config: Optional[dict] = None
     created_at: datetime = field(default_factory=datetime.utcnow)
 
 
@@ -41,7 +63,6 @@ def _record_to_job(r: JobRecord) -> Job:
 
 class JobStore:
     def __init__(self):
-        # In-memory cache for fast WebSocket reads — DB is the source of truth
         self._cache: dict[str, Job] = {}
         self._lock = threading.Lock()
         self._notify: Optional[Callable[[str, dict], None]] = None
@@ -64,11 +85,9 @@ class JobStore:
         return job
 
     def get(self, job_id: str) -> Optional[Job]:
-        # Try cache first
         with self._lock:
             if job_id in self._cache:
                 return self._cache[job_id]
-        # Fall back to DB (e.g. after server restart)
         with SessionLocal() as session:
             record = session.get(JobRecord, job_id)
             if not record:
@@ -91,7 +110,6 @@ class JobStore:
                 "transcript": job.transcript,
             }
 
-        # Persist to DB
         db_kwargs = {k: v for k, v in kwargs.items() if k != "minutes"}
         if "minutes" in kwargs:
             db_kwargs["minutes_json"] = json.dumps(kwargs["minutes"]) if kwargs["minutes"] else None
@@ -107,5 +125,4 @@ class JobStore:
             self._notify(job_id, payload)
 
 
-# Singleton
 store = JobStore()
