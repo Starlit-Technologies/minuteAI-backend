@@ -23,15 +23,6 @@ services:
       # ── Meeting bot ──────────────────────────────────────────────────────────
       - key: MEETING_BOT_MODE
         value: playwright
-      # Path to the Chrome profile that is signed into the recorder Google account.
-      # Bootstrap this profile locally, then copy it to the mounted disk once via
-      # the Render shell: scp -r ./storage/meeting_bot_recorder_profile  <render-ssh-dest>
-      - key: MEETING_BOT_PROFILE_DIR
-        value: /opt/render/project/src/storage/meeting_bot_recorder_profile
-      # Per-session runtime profile copies — kept on disk so large profiles don't
-      # exhaust the container's tmpfs.
-      - key: MEETING_BOT_RUNTIME_PROFILE_ROOT
-        value: /opt/render/project/src/storage/meeting_bot_runtime_profiles
 
       # ── App ──────────────────────────────────────────────────────────────────
       - key: JWT_SECRET

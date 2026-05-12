@@ -1,7 +1,6 @@
 import asyncio
 import base64
 import os
-import shutil
 import subprocess
 import threading
 import time
@@ -16,11 +15,9 @@ import imageio_ffmpeg
 from models.meeting_bot import (
     append_session_log,
     get_session,
-    get_session,
     list_startable_sessions,
     update_session,
 )
-from models.bot_account import get_bot_account
 from services.meeting_bots.platforms import detect_platform
 from services.processing_pipeline import create_processing_job_from_media
 
@@ -30,34 +27,23 @@ except Exception:
     async_playwright = None
 
 
-DEBUG_DIR = Path(__file__).parent.parent.parent / "storage" / "meeting_bot_debug"
+DEBUG_DIR   = Path(__file__).parent.parent.parent / "storage" / "meeting_bot_debug"
 CAPTURE_DIR = Path(__file__).parent.parent.parent / "storage" / "meeting_bot_captures"
-PROFILE_DIR = Path(
-    os.environ.get(
-        "MEETING_BOT_PROFILE_DIR",
-        str(Path(__file__).parent.parent.parent / "storage" / "meeting_bot_recorder_profile"),
-    )
-)
-RUNTIME_PROFILE_ROOT = Path(
-    os.environ.get(
-        "MEETING_BOT_RUNTIME_PROFILE_ROOT",
-        str(Path(__file__).parent.parent.parent / "storage" / "meeting_bot_runtime_profiles"),
-    )
-)
-MEETING_BOT_MODE = os.environ.get("MEETING_BOT_MODE", "playwright").strip().lower()
-MEETING_BOT_RECORDER_NAME = os.environ.get("MEETING_BOT_RECORDER_NAME", "MinuteAI Recorder").strip() or "MinuteAI Recorder"
-MEETING_BOT_RECORD_SECONDS = int(os.environ.get("MEETING_BOT_RECORD_SECONDS", "1800"))
+
+MEETING_BOT_MODE            = os.environ.get("MEETING_BOT_MODE", "playwright").strip().lower()
+MEETING_BOT_RECORDER_NAME   = os.environ.get("MEETING_BOT_RECORDER_NAME", "MinuteAI Recorder").strip() or "MinuteAI Recorder"
+MEETING_BOT_RECORD_SECONDS  = int(os.environ.get("MEETING_BOT_RECORD_SECONDS", "1800"))
 FFMPEG = imageio_ffmpeg.get_ffmpeg_exe()
 
 GOOGLE_MEET_BLOCK_MESSAGES = [
     "You can't join this video call",
     "You can't join this call",
+    "This call is restricted",
 ]
 
 # ── Audio capture via WebRTC interception ─────────────────────────────────────
-# Injected into every page before content loads. Patches RTCPeerConnection to
-# capture all incoming audio tracks into a MediaRecorder. Python drains chunks
-# periodically via page.evaluate('window.__maDrain()').
+# Injected before page content loads. Patches RTCPeerConnection to capture all
+# incoming audio tracks. Python drains chunks via page.evaluate('window.__maDrain()').
 
 _AUDIO_CAPTURE_SCRIPT = r"""
 (function() {
@@ -70,7 +56,7 @@ _AUDIO_CAPTURE_SCRIPT = r"""
     const ctx  = new _AC();
     const dest = ctx.createMediaStreamDestination();
     let   recorder = null;
-    const chunks   = [];   // base64-encoded WebM blobs
+    const chunks   = [];
 
     function tryResume() { ctx.state === 'suspended' && ctx.resume().catch(() => {}); }
     [0, 500, 1500, 3000, 6000].forEach(ms => setTimeout(tryResume, ms));
@@ -105,7 +91,6 @@ _AUDIO_CAPTURE_SCRIPT = r"""
         } catch(_) {}
     }
 
-    // Patch RTCPeerConnection — must happen before any meeting JS runs.
     const _PC = window.RTCPeerConnection;
     if (_PC) {
         function PatchedPC() {
@@ -119,21 +104,15 @@ _AUDIO_CAPTURE_SCRIPT = r"""
         window.RTCPeerConnection = PatchedPC;
     }
 
-    // Drain: Python calls this periodically to collect encoded chunks.
-    window.__maDrain = function() { return chunks.splice(0); };
-
-    // Stop: called before final drain so the last in-flight chunk is flushed.
-    window.__maStop = function() {
+    window.__maDrain  = function() { return chunks.splice(0); };
+    window.__maStop   = function() {
         if (recorder && recorder.state === 'recording') {
             try { recorder.requestData(); } catch(_) {}
-            setTimeout(function() {
-                try { recorder.stop(); } catch(_) {}
-            }, 600);
+            setTimeout(function() { try { recorder.stop(); } catch(_) {} }, 600);
         }
     };
-
-    window.__maActive   = function() { return recorder !== null && recorder.state === 'recording'; };
-    window.__maChunks   = function() { return chunks.length; };
+    window.__maActive = function() { return recorder !== null && recorder.state === 'recording'; };
+    window.__maChunks = function() { return chunks.length; };
 })();
 """
 
@@ -144,13 +123,12 @@ class BotRunContext:
     meeting_url: str
     bot_name: str
     platform: str
-    profile_dir: Optional[Path] = None
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _log(session_id: str, message: str):
-    ts = datetime.utcnow().strftime("%H:%M:%S")
+    ts   = datetime.utcnow().strftime("%H:%M:%S")
     line = f"[{ts}] {message}"
     print(f"[bot:{session_id[:8]}] {message}")
     try:
@@ -166,88 +144,22 @@ def _status(session_id: str, status: str, **extra):
 
 def _failure(session_id: str, message: str, **extra):
     _log(session_id, f"FAILED: {message}")
-    update_session(
-        session_id,
-        status="failed",
-        ended_at=datetime.utcnow(),
-        failure_reason=message,
-        **extra,
-    )
+    update_session(session_id, status="failed", ended_at=datetime.utcnow(), failure_reason=message, **extra)
 
 
 def _current_status(session_id: str) -> Optional[str]:
-    session = get_session(session_id)
-    return session.status if session else None
+    s = get_session(session_id)
+    return s.status if s else None
 
 
 def _capture_has_audio_stream(media_path: str) -> bool:
-    cmd = [FFMPEG, "-i", media_path, "-f", "null", "-"]
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = subprocess.run([FFMPEG, "-i", media_path, "-f", "null", "-"], capture_output=True, text=True)
     return "Audio:" in (result.stderr or "")
-
-
-def _runtime_profile_ignore(dirpath: str, names: list[str]) -> set[str]:
-    volatile = {
-        "Cache", "Code Cache", "GPUCache", "DawnGraphiteCache", "DawnWebGPUCache",
-        "GrShaderCache", "GraphiteDawnCache", "ShaderCache", "Safe Browsing",
-        "Safe Browsing Network", "Service Worker", "Shared Dictionary",
-        "Segmentation Platform", "Session Storage", "Sessions",
-        "AutofillAiModelCache", "WebrtcVideoStats", "blob_storage",
-        "LOCK", "lockfile", "DevToolsActivePort", "CrashpadMetrics-active.pma",
-        "chrome_debug.log", "LOG", "LOG.old",
-    }
-    return {n for n in names if n in volatile or n.startswith("Singleton")}
-
-
-def _prepare_runtime_profile(session_id: str, platform: str, profile_dir: Optional[Path] = None) -> Optional[Path]:
-    if platform != "google_meet":
-        return None
-
-    source = profile_dir or PROFILE_DIR
-    if not source.exists():
-        if profile_dir and PROFILE_DIR.exists():
-            source = PROFILE_DIR
-        else:
-            raise RuntimeError(
-                f"Recorder profile not found at '{source}'. "
-                "Sign the bot account into Google first (see bootstrap script)."
-            )
-
-    RUNTIME_PROFILE_ROOT.mkdir(parents=True, exist_ok=True)
-    import tempfile
-    runtime_dir = Path(tempfile.mkdtemp(prefix=f"{session_id}_", dir=str(RUNTIME_PROFILE_ROOT)))
-    try:
-        shutil.rmtree(runtime_dir)
-        shutil.copytree(source, runtime_dir, ignore=_runtime_profile_ignore)
-    except shutil.Error as exc:
-        locked = any(
-            "Cookies" in str(i) and ("WinError 32" in str(i) or "being used" in str(i))
-            for i in getattr(exc, "args", [])
-        )
-        with suppress(Exception):
-            shutil.rmtree(runtime_dir, ignore_errors=True)
-        if locked:
-            raise RuntimeError(
-                f"Profile at '{source}' is open in another browser. Close it and retry."
-            ) from exc
-        raise
-    except Exception:
-        with suppress(Exception):
-            shutil.rmtree(runtime_dir, ignore_errors=True)
-        raise
-    return runtime_dir
-
-
-def _cleanup_runtime_profile(runtime_dir: Optional[Path]):
-    if runtime_dir:
-        with suppress(Exception):
-            shutil.rmtree(runtime_dir, ignore_errors=True)
 
 
 # ── Audio helpers ─────────────────────────────────────────────────────────────
 
 async def _drain_audio_chunks(page, chunks_store: list, session_id: str):
-    """Background task: drain base64 audio chunks from the page every 10 s."""
     while True:
         await asyncio.sleep(10)
         try:
@@ -273,7 +185,7 @@ def _save_audio_chunks(chunks: list[str], path: str) -> bool:
     return os.path.getsize(path) > 1024
 
 
-# ── Google Meet helpers ───────────────────────────────────────────────────────
+# ── Debug ─────────────────────────────────────────────────────────────────────
 
 async def _take_debug_screenshot(page, session_id: str, label: str) -> str:
     DEBUG_DIR.mkdir(parents=True, exist_ok=True)
@@ -282,6 +194,8 @@ async def _take_debug_screenshot(page, session_id: str, label: str) -> str:
         await page.screenshot(path=str(path), full_page=True)
     return str(path)
 
+
+# ── Google Meet helpers ───────────────────────────────────────────────────────
 
 async def _dismiss_google_meet_prejoin(page):
     for label in ["Continue without microphone", "Continue without camera", "Dismiss", "Got it"]:
@@ -304,15 +218,16 @@ async def _prepare_google_meet(page, meeting_url: str, bot_name: str):
     await _dismiss_google_meet_prejoin(page)
     await _maybe_turn_off_google_meet_av(page)
 
+    # Fill in guest name — always present when not signed in
     for selector in [
         'input[aria-label="Your name"]',
         'input[placeholder="Your name"]',
-        'input[aria-label*="name"]',
+        'input[aria-label*="name" i]',
         'input[type="text"]',
     ]:
         with suppress(Exception):
             field = page.locator(selector).first
-            if await field.is_visible(timeout=1500):
+            if await field.is_visible(timeout=2000):
                 await field.click()
                 await field.fill(bot_name)
                 return
@@ -334,33 +249,6 @@ async def _detect_google_meet_block(page) -> Optional[str]:
             if await page.get_by_text(msg).is_visible(timeout=1000):
                 return msg
     return None
-
-
-async def _has_google_session(page) -> bool:
-    for sel in ['a[aria-label*="Google Account"]', 'button[aria-label*="Google Account"]',
-                'img[alt*="Google Account"]', '[data-email]']:
-        with suppress(Exception):
-            if await page.locator(sel).first.is_visible(timeout=1200):
-                return True
-    for text in ["Sign in", "Choose an account"]:
-        with suppress(Exception):
-            if await page.get_by_text(text).is_visible(timeout=800):
-                return False
-    return False
-
-
-async def _ensure_google_profile_ready(context, session_id: str, profile_dir: Optional[Path] = None):
-    page = context.pages[0] if context.pages else await context.new_page()
-    await page.goto("https://meet.google.com/", wait_until="domcontentloaded", timeout=60000)
-    await page.wait_for_timeout(2000)
-    if await _has_google_session(page):
-        return page
-    screenshot_path = await _take_debug_screenshot(page, session_id, "google_login_required")
-    raise RuntimeError(
-        "Recorder profile is not signed into Google. "
-        f"Bootstrap the recorder account at '{profile_dir or PROFILE_DIR}'. "
-        f"Debug screenshot: {screenshot_path}"
-    )
 
 
 # ── Zoom helpers ──────────────────────────────────────────────────────────────
@@ -404,7 +292,7 @@ async def _wait_for_admission(page, session_id: str, platform: str) -> bool:
             if blocked:
                 raise RuntimeError(
                     f"Google Meet blocked the bot: {blocked}. "
-                    "The meeting may require signed-in participants only."
+                    "The meeting may be restricted to signed-in accounts only."
                 )
             signals = [
                 page.get_by_role("button", name="Leave call"),
@@ -440,7 +328,7 @@ async def _is_still_in_meeting(page, platform: str) -> bool:
         ended = ["You left the meeting", "Call ended", "Return to home screen", "Ready to join?"]
     else:
         active = [page.get_by_role("button", name="Leave"), page.get_by_text("Mute"), page.get_by_text("Participants")]
-        ended = ["You have left the meeting", "This meeting has ended", "Join Meeting"]
+        ended  = ["You have left the meeting", "This meeting has ended", "Join Meeting"]
 
     for loc in active:
         with suppress(Exception):
@@ -473,8 +361,7 @@ async def _leave_meeting(page, platform: str):
             if await button.is_visible(timeout=1200):
                 await button.click(timeout=2000)
                 await page.wait_for_timeout(1500)
-                return True
-    return False
+                return
 
 
 # ── Main Playwright session ───────────────────────────────────────────────────
@@ -489,67 +376,44 @@ async def _run_playwright_session(ctx: BotRunContext):
         return
 
     _status(ctx.session_id, "preparing", started_at=datetime.utcnow(), failure_reason=None)
-    _log(ctx.session_id, f"Preparing browser session for {ctx.platform} — {ctx.meeting_url}")
+    _log(ctx.session_id, f"Preparing browser for {ctx.platform} — {ctx.meeting_url}")
 
-    runtime_profile_dir: Optional[Path] = None
     audio_chunks: list[str] = []
     drain_task: Optional[asyncio.Task] = None
 
-    PROFILE_DIR.mkdir(parents=True, exist_ok=True)
     CAPTURE_DIR.mkdir(parents=True, exist_ok=True)
 
+    chromium_args = [
+        "--use-fake-ui-for-media-stream",
+        "--use-fake-device-for-media-stream",
+        "--disable-blink-features=AutomationControlled",
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-gpu",
+        "--autoplay-policy=no-user-gesture-required",
+        "--disable-features=IsolateOrigins,site-per-process",
+        "--disable-dev-shm-usage",
+        "--disable-extensions",
+    ]
+
     try:
-        runtime_profile_dir = _prepare_runtime_profile(ctx.session_id, ctx.platform, ctx.profile_dir)
-
-        # Chromium launch flags — tuned for headless meeting capture
-        chromium_args = [
-            "--use-fake-ui-for-media-stream",
-            "--use-fake-device-for-media-stream",
-            "--disable-blink-features=AutomationControlled",
-            "--no-sandbox",
-            "--disable-setuid-sandbox",
-            "--disable-gpu",
-            "--autoplay-policy=no-user-gesture-required",
-            "--disable-features=IsolateOrigins,site-per-process",
-            "--disable-dev-shm-usage",
-            "--disable-extensions",
-        ]
-
         async with async_playwright() as pw:
+            browser = None
             context = None
-            browser  = None
-            page     = None
+            page    = None
 
             try:
-                if ctx.platform == "google_meet":
-                    context = await pw.chromium.launch_persistent_context(
-                        user_data_dir=str(runtime_profile_dir),
-                        headless=True,
-                        viewport={"width": 1440, "height": 900},
-                        permissions=["camera", "microphone"],
-                        ignore_https_errors=True,
-                        args=chromium_args,
-                    )
-                else:
-                    browser = await pw.chromium.launch(
-                        headless=True,
-                        args=chromium_args,
-                    )
-                    context = await browser.new_context(
-                        viewport={"width": 1440, "height": 900},
-                        permissions=["camera", "microphone"],
-                        ignore_https_errors=True,
-                    )
+                browser = await pw.chromium.launch(headless=True, args=chromium_args)
+                context = await browser.new_context(
+                    viewport={"width": 1440, "height": 900},
+                    permissions=["camera", "microphone"],
+                    ignore_https_errors=True,
+                )
 
-                # Inject audio capture script into every page/frame before content loads
                 await context.add_init_script(_AUDIO_CAPTURE_SCRIPT)
                 _log(ctx.session_id, "Audio capture script registered")
 
-                if ctx.platform == "google_meet":
-                    page = await _ensure_google_profile_ready(context, ctx.session_id, ctx.profile_dir)
-                else:
-                    page = context.pages[0] if context.pages else await context.new_page()
-
+                page = await context.new_page()
                 await page.goto(ctx.meeting_url, wait_until="domcontentloaded", timeout=60000)
                 await _take_debug_screenshot(page, ctx.session_id, "landing")
 
@@ -570,51 +434,39 @@ async def _run_playwright_session(ctx: BotRunContext):
                 if not joined:
                     _failure(
                         ctx.session_id,
-                        f"Bot could not confirm admission to the meeting. "
+                        "Bot was not admitted to the meeting within the timeout. "
+                        "The host needs to accept 'MinuteAI Recorder' from the waiting room. "
                         f"Debug screenshot: {screenshot_path}",
                         recording_path=screenshot_path,
                     )
                     return
 
-                _log(ctx.session_id, "Joined meeting — audio capture active")
+                _log(ctx.session_id, "Admitted — audio capture active")
 
-                # Start background audio drain
-                drain_task = asyncio.create_task(
-                    _drain_audio_chunks(page, audio_chunks, ctx.session_id)
-                )
-
-                # Wait for meeting to end (or timeout / user cancel)
+                drain_task = asyncio.create_task(_drain_audio_chunks(page, audio_chunks, ctx.session_id))
                 await _wait_for_recording_completion(page, ctx.session_id, ctx.platform)
 
             except Exception as exc:
                 screenshot_path = None
                 with suppress(Exception):
                     screenshot_path = await _take_debug_screenshot(page, ctx.session_id, "error")
-                _failure(
-                    ctx.session_id,
-                    f"Browser automation error: {exc}",
-                    recording_path=screenshot_path,
-                )
+                _failure(ctx.session_id, f"Browser automation error: {exc}", recording_path=screenshot_path)
 
             finally:
-                # Stop drain task
                 if drain_task and not drain_task.done():
                     drain_task.cancel()
                     with suppress(Exception):
                         await drain_task
 
-                # Ask recorder to flush its last chunk, then wait for it
                 with suppress(Exception):
                     await page.evaluate("if (window.__maStop) window.__maStop()")
                 with suppress(Exception):
                     await page.wait_for_timeout(1500)
-                # Final drain
                 with suppress(Exception):
                     final = await page.evaluate("window.__maDrain ? window.__maDrain() : []")
                     audio_chunks.extend(final)
                     _log(ctx.session_id, f"Final drain: {len(final)} chunk(s), total {len(audio_chunks)}")
 
-                # Leave and close browser
                 if page is not None:
                     with suppress(Exception):
                         await _leave_meeting(page, ctx.platform)
@@ -626,19 +478,15 @@ async def _run_playwright_session(ctx: BotRunContext):
                         await browser.close()
 
         # ── Post-session: save audio and create processing job ─────────────────
-        current_status = _current_status(ctx.session_id)
-        if current_status in {"failed", "cancelled"}:
+        if _current_status(ctx.session_id) in {"failed", "cancelled"}:
             return
 
         audio_path = str(CAPTURE_DIR / f"{ctx.session_id}.webm")
-        audio_ok = _save_audio_chunks(audio_chunks, audio_path)
-
-        if not audio_ok:
+        if not _save_audio_chunks(audio_chunks, audio_path):
             _failure(
                 ctx.session_id,
                 "Audio capture produced no data. The meeting may have had no audio, "
-                "or the browser was blocked from processing WebRTC streams. "
-                "Try running with MEETING_BOT_MODE=playwright and ensuring the bot was admitted.",
+                "or the browser was blocked from processing WebRTC streams.",
             )
             return
 
@@ -671,8 +519,6 @@ async def _run_playwright_session(ctx: BotRunContext):
 
     except Exception as exc:
         _failure(ctx.session_id, f"Session failed before launch: {exc}")
-    finally:
-        _cleanup_runtime_profile(runtime_profile_dir)
 
 
 # ── Thread entry point ────────────────────────────────────────────────────────
@@ -711,20 +557,17 @@ def _run_session(session_id: str):
         _failure(session_id, str(exc))
         return
 
-    bot_account = get_bot_account(session.bot_account_id) if session.bot_account_id else None
     ctx = BotRunContext(
         session_id=session.id,
         meeting_url=session.meeting_url,
         bot_name=session.bot_name or MEETING_BOT_RECORDER_NAME,
         platform=platform,
-        profile_dir=Path(bot_account.profile_dir) if bot_account else None,
     )
     asyncio.run(_run_playwright_session(ctx))
 
 
 def start_meeting_bot_session(session_id: str):
-    worker = threading.Thread(target=_run_session, args=(session_id,), daemon=True)
-    worker.start()
+    threading.Thread(target=_run_session, args=(session_id,), daemon=True).start()
 
 
 def start_pending_meeting_bot_sessions():
