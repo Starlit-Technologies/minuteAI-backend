@@ -30,9 +30,12 @@ def _get_local_model():
         _local_model = whisper.load_model(model_name)
     return _local_model
 
-def _transcribe_chunk_local(chunk_path: str) -> str:
+def _transcribe_chunk_local(chunk_path: str, language: str | None = None) -> str:
     model = _get_local_model()
-    result = model.transcribe(chunk_path, fp16=False)
+    opts = {"fp16": False}
+    if language:
+        opts["language"] = language
+    result = model.transcribe(chunk_path, **opts)
     return result["text"].strip()
 
 
@@ -50,16 +53,15 @@ def _get_groq_client():
         )
     return _groq_client
 
-def _transcribe_chunk_groq(chunk_path: str) -> str:
+def _transcribe_chunk_groq(chunk_path: str, language: str | None = None) -> str:
     client = _get_groq_client()
     for attempt in range(6):
         try:
+            kwargs = dict(model="whisper-large-v3-turbo", response_format="text")
+            if language:
+                kwargs["language"] = language
             with open(chunk_path, "rb") as f:
-                response = client.audio.transcriptions.create(
-                    model="whisper-large-v3-turbo",
-                    file=f,
-                    response_format="text",
-                )
+                response = client.audio.transcriptions.create(file=f, **kwargs)
             return response.strip() if isinstance(response, str) else response.text.strip()
         except Exception as e:
             msg = str(e)
@@ -117,10 +119,10 @@ def _split_audio(audio_path: str, chunk_dir: str) -> list[str]:
     return [str(c) for c in chunks]
 
 
-def _transcribe_chunk(chunk_path: str) -> str:
+def _transcribe_chunk(chunk_path: str, language: str | None = None) -> str:
     if BACKEND == "groq":
-        return _transcribe_chunk_groq(chunk_path)
-    return _transcribe_chunk_local(chunk_path)
+        return _transcribe_chunk_groq(chunk_path, language=language)
+    return _transcribe_chunk_local(chunk_path, language=language)
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -128,6 +130,7 @@ def _transcribe_chunk(chunk_path: str) -> str:
 def transcribe(
     audio_path: str,
     on_partial: Optional[Callable[[str], None]] = None,
+    language: Optional[str] = None,
 ) -> str:
     """
     Transcribe audio in 30-second chunks.
@@ -142,7 +145,7 @@ def transcribe(
         for i, chunk_path in enumerate(chunks):
             if i > 0 and BACKEND == "groq":
                 time.sleep(GROQ_INTER_CHUNK_DELAY)
-            chunk_text = _transcribe_chunk(chunk_path)
+            chunk_text = _transcribe_chunk(chunk_path, language=language)
             if chunk_text:
                 full_text = (full_text + " " + chunk_text).strip()
             if on_partial and full_text:

@@ -1,5 +1,6 @@
+import json
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
 
@@ -26,7 +27,8 @@ class MeetingBotSession:
     failure_reason: Optional[str]
     recording_path: Optional[str]
     job_id: Optional[str]
-    created_at: Optional[datetime]
+    logs: list[str] = field(default_factory=list)
+    created_at: Optional[datetime] = None
 
 
 def _to_dataclass(record: MeetingBotSessionRecord) -> MeetingBotSession:
@@ -49,6 +51,7 @@ def _to_dataclass(record: MeetingBotSessionRecord) -> MeetingBotSession:
         failure_reason=record.failure_reason,
         recording_path=record.recording_path,
         job_id=record.job_id,
+        logs=json.loads(record.logs_json) if getattr(record, "logs_json", None) else [],
         created_at=record.created_at,
     )
 
@@ -93,6 +96,19 @@ def create_session(
 def get_session(session_id: str) -> Optional[MeetingBotSession]:
     with SessionLocal() as db:
         record = db.get(MeetingBotSessionRecord, session_id)
+        return _to_dataclass(record) if record else None
+
+
+def get_session_by_user_event(user_id: str, calendar_event_id: str) -> Optional[MeetingBotSession]:
+    with SessionLocal() as db:
+        record = (
+            db.query(MeetingBotSessionRecord)
+            .filter(
+                MeetingBotSessionRecord.user_id == user_id,
+                MeetingBotSessionRecord.calendar_event_id == calendar_event_id,
+            )
+            .first()
+        )
         return _to_dataclass(record) if record else None
 
 
@@ -174,6 +190,19 @@ def recover_processing_sessions():
             )
         if records:
             db.commit()
+
+
+def append_session_log(session_id: str, line: str) -> None:
+    with SessionLocal() as db:
+        record = db.get(MeetingBotSessionRecord, session_id)
+        if not record:
+            return
+        logs = json.loads(record.logs_json) if getattr(record, "logs_json", None) else []
+        logs.append(line)
+        if len(logs) > 300:
+            logs = logs[-300:]
+        record.logs_json = json.dumps(logs)
+        db.commit()
 
 
 def update_session(session_id: str, **kwargs) -> Optional[MeetingBotSession]:

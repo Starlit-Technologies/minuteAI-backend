@@ -63,7 +63,8 @@ def run_pipeline(job_id: str):
             def on_partial(text: str):
                 store.update(job_id, transcript=text)
 
-            transcript = transcribe(audio_path, on_partial=on_partial)
+            lang = (job.job_config or {}).get("audio_language") or None
+            transcript = transcribe(audio_path, on_partial=on_partial, language=lang or None)
             if not transcript or not transcript.strip():
                 raise RuntimeError("Transcription returned no text. The audio may be silent or unreadable.")
             store.update(job_id, transcript=transcript)
@@ -77,7 +78,7 @@ def run_pipeline(job_id: str):
         minutes = job.minutes
         if not minutes:
             store.update(job_id, status="formatting", message="Formatting minutes with Claude…")
-            minutes = format_minutes(transcript)
+            minutes = format_minutes(transcript, config=job.job_config)
             store.update(job_id, minutes=minutes)
 
         docx_path = job.docx_path

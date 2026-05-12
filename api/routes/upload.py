@@ -26,16 +26,36 @@ async def init_upload(
     filesize: int = Form(...),
     email: Optional[str] = Form(None),
     workspace_id: Optional[str] = Form(None),
+    # Pre-processing config
+    meeting_type: Optional[str] = Form(None),
+    meeting_title: Optional[str] = Form(None),
+    attendees: Optional[str] = Form(None),
+    audio_language: Optional[str] = Form(None),
+    custom_instructions: Optional[str] = Form(None),
+    template: Optional[str] = Form("standard"),
+    output_language: Optional[str] = Form("en"),
     current_user: Optional[User] = Depends(get_optional_user),
 ):
     job_id = str(uuid.uuid4())
     (CHUNK_DIR / job_id).mkdir(parents=True, exist_ok=True)
+
+    job_config = {
+        "meeting_type": meeting_type or "general",
+        "meeting_title": meeting_title or "",
+        "attendees": attendees or "",
+        "audio_language": audio_language or "",
+        "custom_instructions": custom_instructions or "",
+        "template": template or "standard",
+        "output_language": output_language or "en",
+    }
+
     store.create(Job(
         id=job_id,
         status="uploading",
         email=email or (current_user.email if current_user else None),
         user_id=current_user.id if current_user else None,
         workspace_id=workspace_id,
+        job_config=job_config,
     ))
     return {"jobId": job_id, "chunkSize": 5 * 1024 * 1024}
 

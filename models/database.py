@@ -55,6 +55,7 @@ class JobRecord(Base):
     pdf_path     = Column(String,  nullable=True)
     starred      = Column(Boolean, nullable=False, default=False)
     workspace_id = Column(String,  nullable=True, index=True)
+    config_json  = Column(Text,    nullable=True)
     created_at   = Column(DateTime, server_default=func.now())
 
 
@@ -92,6 +93,7 @@ class MeetingBotSessionRecord(Base):
     failure_reason = Column(Text,    nullable=True)
     recording_path = Column(String,  nullable=True)
     job_id         = Column(String,  nullable=True, index=True)
+    logs_json      = Column(Text,    nullable=True)
     created_at     = Column(DateTime, server_default=func.now())
 
 
@@ -107,6 +109,20 @@ class BotAccountRecord(Base):
     status       = Column(String, nullable=False, default="needs_setup", index=True)
     kind         = Column(String, nullable=False, default="dedicated")
     created_at   = Column(DateTime, server_default=func.now())
+
+
+class ConnectedAccountRecord(Base):
+    __tablename__ = "connected_accounts"
+
+    id            = Column(String, primary_key=True)
+    user_id       = Column(String, nullable=False, index=True)
+    provider      = Column(String, nullable=False)
+    access_token  = Column(Text,   nullable=False)
+    refresh_token = Column(Text,   nullable=True)
+    token_expiry  = Column(DateTime, nullable=True)
+    email         = Column(String, nullable=True)
+    auto_join     = Column(Boolean, nullable=False, default=True)
+    created_at    = Column(DateTime, server_default=func.now())
 
 
 def create_tables():
@@ -172,6 +188,9 @@ def run_migrations():
             "ALTER TABLE meeting_bot_sessions ADD COLUMN IF NOT EXISTS bot_account_id TEXT",
             "ALTER TABLE meeting_bot_sessions ADD COLUMN IF NOT EXISTS calendar_event_id TEXT",
             "ALTER TABLE meeting_bot_sessions ADD COLUMN IF NOT EXISTS source TEXT",
+            "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS config_json TEXT",
+            "ALTER TABLE meeting_bot_sessions ADD COLUMN IF NOT EXISTS logs_json TEXT",
+            "CREATE TABLE IF NOT EXISTS connected_accounts (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, provider TEXT NOT NULL, access_token TEXT NOT NULL, refresh_token TEXT, token_expiry TIMESTAMP, email TEXT, auto_join BOOLEAN NOT NULL DEFAULT true, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, UNIQUE (user_id, provider))",
         ]
     else:
         migrations = [
@@ -196,10 +215,13 @@ def run_migrations():
             "ALTER TABLE meeting_bot_sessions ADD COLUMN bot_account_id TEXT",
             "ALTER TABLE meeting_bot_sessions ADD COLUMN calendar_event_id TEXT",
             "ALTER TABLE meeting_bot_sessions ADD COLUMN source TEXT",
+            "ALTER TABLE jobs ADD COLUMN config_json TEXT",
+            "ALTER TABLE meeting_bot_sessions ADD COLUMN logs_json TEXT",
             "CREATE TABLE IF NOT EXISTS bot_accounts (id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL UNIQUE, email TEXT NOT NULL UNIQUE, display_name TEXT NOT NULL DEFAULT 'MinuteAI Recorder', profile_dir TEXT NOT NULL, provider TEXT NOT NULL DEFAULT 'google', status TEXT NOT NULL DEFAULT 'needs_setup', kind TEXT NOT NULL DEFAULT 'dedicated', created_at DATETIME DEFAULT CURRENT_TIMESTAMP)",
             "CREATE TABLE IF NOT EXISTS admin_grants (id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, created_by_id TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)",
             "CREATE TABLE IF NOT EXISTS promo_codes (id TEXT PRIMARY KEY, code TEXT NOT NULL UNIQUE, description TEXT, discount_type TEXT NOT NULL DEFAULT 'percent', discount_value INTEGER NOT NULL DEFAULT 0, active INTEGER NOT NULL DEFAULT 1, max_uses INTEGER, uses_count INTEGER NOT NULL DEFAULT 0, expires_at DATETIME, created_by_id TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)",
             "CREATE TABLE IF NOT EXISTS promo_code_redemptions (id TEXT PRIMARY KEY, promo_code_id TEXT NOT NULL, user_id TEXT, checkout_session_id TEXT NOT NULL UNIQUE, subscription_id TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)",
+            "CREATE TABLE IF NOT EXISTS connected_accounts (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, provider TEXT NOT NULL, access_token TEXT NOT NULL, refresh_token TEXT, token_expiry DATETIME, email TEXT, auto_join INTEGER NOT NULL DEFAULT 1, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, UNIQUE (user_id, provider))",
         ]
     with engine.connect() as conn:
         for sql in migrations:

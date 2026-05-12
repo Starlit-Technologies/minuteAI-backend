@@ -23,12 +23,15 @@ from api.routes.tasks         import router as tasks_router
 from api.routes.notifications import router as notifications_router
 from api.routes.admin import router as admin_router
 from api.routes.meeting_bots import router as meeting_bots_router
+from api.routes.translate import router as translate_router
+from api.routes.integrations import router as integrations_router
 from models.job import store
 from models.database import create_tables, run_migrations, recover_stuck_jobs, seed_default_workspaces
 from models.bot_account import ensure_bot_accounts_for_all_workspaces
 from models.meeting_bot import recover_processing_sessions
 from services.meeting_bots.runner import start_pending_meeting_bot_sessions
 from services.meeting_bots.calendar_sync import start_calendar_sync_loop
+from services.user_calendar_sync import start_user_calendar_sync_loop
 
 app = FastAPI(title="MinuteAI API", version="1.0.0")
 
@@ -71,6 +74,8 @@ app.include_router(tasks_router)
 app.include_router(notifications_router)
 app.include_router(admin_router)
 app.include_router(meeting_bots_router)
+app.include_router(translate_router)
+app.include_router(integrations_router)
 app.include_router(billing_router)
 app.include_router(upload_router)
 app.include_router(status_router)
@@ -93,6 +98,7 @@ async def startup():
     store.set_notify(manager.notify)
     start_pending_meeting_bot_sessions()
     start_calendar_sync_loop()
+    start_user_calendar_sync_loop()
 
 
 Path("storage/avatars").mkdir(parents=True, exist_ok=True)

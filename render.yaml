@@ -2,13 +2,38 @@ services:
   - type: web
     name: minuteai-backend
     runtime: python
-    buildCommand: pip install -r requirements.txt
+    plan: standard  # 2 GB RAM — required for headless Chromium (meeting bot)
+    buildCommand: pip install -r requirements.txt && playwright install chromium --with-deps
     startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /health
     autoDeployTrigger: commit
+
+    # Persistent disk — keeps uploads, outputs, and the Google Meet bot profile
+    # across deploys and restarts.  All storage paths in the backend code resolve
+    # to <project_root>/storage/, which is exactly where this disk is mounted.
+    disk:
+      name: minuteai-storage
+      mountPath: /opt/render/project/src/storage
+      sizeGB: 10
+
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.9
+
+      # ── Meeting bot ──────────────────────────────────────────────────────────
+      - key: MEETING_BOT_MODE
+        value: playwright
+      # Path to the Chrome profile that is signed into the recorder Google account.
+      # Bootstrap this profile locally, then copy it to the mounted disk once via
+      # the Render shell: scp -r ./storage/meeting_bot_recorder_profile  <render-ssh-dest>
+      - key: MEETING_BOT_PROFILE_DIR
+        value: /opt/render/project/src/storage/meeting_bot_recorder_profile
+      # Per-session runtime profile copies — kept on disk so large profiles don't
+      # exhaust the container's tmpfs.
+      - key: MEETING_BOT_RUNTIME_PROFILE_ROOT
+        value: /opt/render/project/src/storage/meeting_bot_runtime_profiles
+
+      # ── App ──────────────────────────────────────────────────────────────────
       - key: JWT_SECRET
         generateValue: true
       - key: WHISPER_BACKEND
@@ -17,6 +42,8 @@ services:
         value: https://minuteai-frontend.onrender.com
       - key: CORS_ORIGINS
         value: https://minuteai-frontend.onrender.com,https://minuteai-admin.onrender.com
+
+      # ── Secrets (set in Render dashboard, not committed) ─────────────────────
       - key: DATABASE_URL
         sync: false
       - key: ANTHROPIC_API_KEY
@@ -39,3 +66,11 @@ services:
         sync: false
       - key: GOOGLE_CLIENT_ID
         sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: ZOOM_OAUTH_CLIENT_ID
+        sync: false
+      - key: ZOOM_OAUTH_CLIENT_SECRET
+        sync: false
+      - key: BACKEND_URL
+        value: https://minuteai-backend.onrender.com

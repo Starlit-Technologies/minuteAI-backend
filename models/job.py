@@ -21,10 +21,12 @@ class Job:
     pdf_path: Optional[str] = None
     starred: bool = False
     workspace_id: Optional[str] = None
+    job_config: Optional[dict] = None   # meeting type, template, attendees, etc.
     created_at: datetime = field(default_factory=datetime.utcnow)
 
 
 def _record_to_job(r: JobRecord) -> Job:
+    config_raw = getattr(r, "config_json", None)
     return Job(
         id=r.id, status=r.status, message=r.message, email=r.email,
         user_id=getattr(r, "user_id", None),
@@ -33,6 +35,7 @@ def _record_to_job(r: JobRecord) -> Job:
         docx_path=r.docx_path, pdf_path=r.pdf_path,
         starred=bool(getattr(r, "starred", False)),
         workspace_id=getattr(r, "workspace_id", None),
+        job_config=json.loads(config_raw) if config_raw else None,
     )
 
 
@@ -52,6 +55,7 @@ class JobStore:
                 id=job.id, status=job.status, email=job.email,
                 user_id=job.user_id, audio_path=job.audio_path,
                 workspace_id=job.workspace_id,
+                config_json=json.dumps(job.job_config) if job.job_config else None,
             )
             session.add(record)
             session.commit()

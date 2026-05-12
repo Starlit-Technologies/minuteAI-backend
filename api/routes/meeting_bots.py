@@ -71,6 +71,7 @@ def _serialize(session):
         "failure_reason": session.failure_reason,
         "recording_path": session.recording_path,
         "job_id": session.job_id,
+        "logs": session.logs,
         "created_at": session.created_at.isoformat() + "Z" if session.created_at else None,
     }
 
