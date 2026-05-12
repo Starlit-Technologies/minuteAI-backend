@@ -253,28 +253,84 @@ async def _detect_google_meet_block(page) -> Optional[str]:
 
 # ── Zoom helpers ──────────────────────────────────────────────────────────────
 
-async def _prepare_zoom(page):
-    await page.goto(page.url, wait_until="domcontentloaded", timeout=60000)
-    for text in ["Join from Your Browser", "join from your browser"]:
+async def _zoom_click_join_from_browser(page):
+    """Click the 'Join from Your Browser' link on Zoom's launcher page."""
+    selectors = [
+        "a#btnBrowserJoin",
+        "a.join-from-browser",
+        "a:has-text('Join from Your Browser')",
+        "a:has-text('join from your browser')",
+        "[data-testid='join-from-browser']",
+    ]
+    for selector in selectors:
         with suppress(Exception):
-            await page.get_by_text(text).click(timeout=3000)
-            break
+            elem = page.locator(selector).first
+            if await elem.is_visible(timeout=3000):
+                await elem.click()
+                await page.wait_for_timeout(2500)
+                return
+    # Sometimes appears after a short delay — one more attempt
+    await page.wait_for_timeout(3000)
+    for selector in selectors:
+        with suppress(Exception):
+            elem = page.locator(selector).first
+            if await elem.is_visible(timeout=2000):
+                await elem.click()
+                await page.wait_for_timeout(2000)
+                return
 
 
-async def _join_zoom(page, bot_name: str, session_id: str):
-    for selector in ['input[aria-label="Your Name"]', 'input[name="inputname"]', 'input[type="text"]']:
+async def _zoom_fill_name(page, bot_name: str):
+    selectors = [
+        "#inputname",
+        'input[name="inputname"]',
+        'input[aria-label="Your Name"]',
+        'input[placeholder="Your Name"]',
+        'input[placeholder="Enter your name"]',
+        'input[type="text"]',
+    ]
+    for selector in selectors:
         with suppress(Exception):
             field = page.locator(selector).first
-            if await field.is_visible(timeout=1500):
+            if await field.is_visible(timeout=3000):
+                await field.triple_click()
                 await field.fill(bot_name)
-                break
+                return
 
-    for label in ["Join", "Join Meeting"]:
+
+async def _zoom_click_join_button(page, session_id: str):
+    selectors = [
+        "#joinBtn",
+        "button#joinBtn",
+        'button[data-testid="join-btn"]',
+        "button.preview-join-button",
+        "button:has-text('Join')",
+    ]
+    for selector in selectors:
         with suppress(Exception):
-            await page.get_by_role("button", name=label).click(timeout=2500)
-            _status(session_id, "joining")
-            return
+            btn = page.locator(selector).first
+            if await btn.is_visible(timeout=2000):
+                await btn.click()
+                _status(session_id, "joining")
+                return
+    # Fall back to role-based
+    for label in ["Join", "Join Meeting", "Join Audio by Computer"]:
+        with suppress(Exception):
+            btn = page.get_by_role("button", name=label, exact=False).first
+            if await btn.is_visible(timeout=1500):
+                await btn.click()
+                _status(session_id, "joining")
+                return
     raise RuntimeError("Could not find the Zoom join button.")
+
+
+async def _prepare_and_join_zoom(page, meeting_url: str, bot_name: str, session_id: str):
+    await page.goto(meeting_url, wait_until="domcontentloaded", timeout=60000)
+    await page.wait_for_timeout(2000)
+    await _zoom_click_join_from_browser(page)
+    await _zoom_fill_name(page, bot_name)
+    await page.wait_for_timeout(500)
+    await _zoom_click_join_button(page, session_id)
 
 
 # ── Shared wait/detection ─────────────────────────────────────────────────────
@@ -414,7 +470,6 @@ async def _run_playwright_session(ctx: BotRunContext):
                 _log(ctx.session_id, "Audio capture script registered")
 
                 page = await context.new_page()
-                await page.goto(ctx.meeting_url, wait_until="domcontentloaded", timeout=60000)
                 await _take_debug_screenshot(page, ctx.session_id, "landing")
 
                 if ctx.platform == "google_meet":
@@ -422,9 +477,8 @@ async def _run_playwright_session(ctx: BotRunContext):
                     await _take_debug_screenshot(page, ctx.session_id, "prejoin")
                     await _join_google_meet(page, ctx.session_id)
                 elif ctx.platform == "zoom":
-                    await _prepare_zoom(page)
+                    await _prepare_and_join_zoom(page, ctx.meeting_url, ctx.bot_name, ctx.session_id)
                     await _take_debug_screenshot(page, ctx.session_id, "prejoin")
-                    await _join_zoom(page, ctx.bot_name, ctx.session_id)
                 else:
                     raise RuntimeError(f"Unsupported platform: {ctx.platform}")
 
