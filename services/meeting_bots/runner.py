@@ -42,6 +42,48 @@ GOOGLE_MEET_BLOCK_MESSAGES = [
     "This call is restricted",
 ]
 
+_USER_AGENT = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
+
+# ── Anti-detection init script ────────────────────────────────────────────────
+# Runs before any page content so Cloudflare and meeting platforms see a
+# normal browser rather than headless automation.
+
+_ANTIDETECT_SCRIPT = """
+(function() {
+    // Hide webdriver flag
+    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+
+    // Realistic language / plugin lists
+    Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+    Object.defineProperty(navigator, 'plugins', {
+        get: () => Object.assign([
+            { name: 'Chrome PDF Plugin',  filename: 'internal-pdf-viewer' },
+            { name: 'Chrome PDF Viewer',  filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai' },
+            { name: 'Native Client',      filename: 'internal-nacl-plugin' }
+        ], { length: 3 })
+    });
+
+    // chrome runtime stub (absent in headless)
+    if (!window.chrome) {
+        window.chrome = { runtime: {}, loadTimes: function(){}, csi: function(){} };
+    }
+
+    // Permissions API stub so sites see a real browser
+    const _query = window.Permissions && window.Permissions.prototype.query;
+    if (_query) {
+        window.Permissions.prototype.query = function(params) {
+            if (params && params.name === 'notifications') {
+                return Promise.resolve({ state: 'denied', onchange: null });
+            }
+            return _query.apply(this, arguments);
+        };
+    }
+})();
+"""
+
 # ── Audio capture via WebRTC interception ─────────────────────────────────────
 # Injected before page content loads. Patches RTCPeerConnection to capture all
 # incoming audio tracks. Python drains chunks via page.evaluate('window.__maDrain()').
@@ -367,7 +409,13 @@ async def _zoom_click_join_button(page, session_id: str):
 
 async def _prepare_and_join_zoom(page, meeting_url: str, bot_name: str, session_id: str):
     await page.goto(meeting_url, wait_until="domcontentloaded", timeout=60000)
-    await page.wait_for_timeout(2500)
+    # Wait for Cloudflare "Just a moment..." challenge to clear
+    with suppress(Exception):
+        await page.wait_for_function(
+            "() => document.title !== 'Just a moment...'",
+            timeout=15000,
+        )
+    await page.wait_for_timeout(2000)
     await _zoom_click_join_from_browser(page, session_id)
     await _zoom_fill_name(page, bot_name, session_id)
     await page.wait_for_timeout(800)
@@ -505,10 +553,14 @@ async def _run_playwright_session(ctx: BotRunContext):
                     viewport={"width": 1440, "height": 900},
                     permissions=["camera", "microphone"],
                     ignore_https_errors=True,
+                    user_agent=_USER_AGENT,
+                    locale="en-US",
+                    timezone_id="America/New_York",
                 )
 
+                await context.add_init_script(_ANTIDETECT_SCRIPT)
                 await context.add_init_script(_AUDIO_CAPTURE_SCRIPT)
-                _log(ctx.session_id, "Audio capture script registered")
+                _log(ctx.session_id, "Anti-detect + audio capture scripts registered")
 
                 page = await context.new_page()
                 await _take_debug_screenshot(page, ctx.session_id, "landing")
