@@ -4,12 +4,12 @@ from db.base import engine, SessionLocal
 
 
 def create_tables():
-    import models.user       # noqa: F401
-    import models.job        # noqa: F401
-    import models.task       # noqa: F401
-    import models.notification  # noqa: F401
-    import models.meeting_bot   # noqa: F401
-    import models.bot_account   # noqa: F401
+    import models.user            # noqa: F401  (includes SubscriptionPlan)
+    import models.job             # noqa: F401
+    import models.task            # noqa: F401
+    import models.notification    # noqa: F401
+    import models.meeting_bot     # noqa: F401
+    import models.bot_account     # noqa: F401
     import models.connected_account  # noqa: F401
     from db.base import Base
     Base.metadata.create_all(bind=engine)
@@ -75,6 +75,11 @@ def run_migrations():
             "ALTER TABLE meeting_bot_sessions ADD COLUMN IF NOT EXISTS logs_json TEXT",
             "CREATE TABLE IF NOT EXISTS connected_accounts (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, provider TEXT NOT NULL, access_token TEXT NOT NULL, refresh_token TEXT, token_expiry TIMESTAMP, email TEXT, auto_join BOOLEAN NOT NULL DEFAULT true, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, UNIQUE (user_id, provider))",
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMP",
+            "CREATE TABLE IF NOT EXISTS subscription_plans (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, display_name TEXT NOT NULL, description TEXT, price_monthly INTEGER NOT NULL DEFAULT 0, currency TEXT NOT NULL DEFAULT 'usd', interval TEXT NOT NULL DEFAULT 'month', features_json TEXT, meetings_per_month INTEGER, audio_hours_per_month INTEGER, stripe_product_id TEXT, stripe_price_id TEXT, is_active BOOLEAN NOT NULL DEFAULT true, is_popular BOOLEAN NOT NULL DEFAULT false, sort_order INTEGER NOT NULL DEFAULT 0, created_by_id TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
+            "ALTER TABLE subscription_plans ADD COLUMN IF NOT EXISTS meetings_per_month INTEGER",
+            "ALTER TABLE subscription_plans ADD COLUMN IF NOT EXISTS audio_hours_per_month INTEGER",
+            "ALTER TABLE subscription_plans ADD COLUMN IF NOT EXISTS max_workspaces INTEGER",
+            "ALTER TABLE subscription_plans ADD COLUMN IF NOT EXISTS max_members INTEGER",
         ]
     else:
         migrations = [
@@ -106,6 +111,11 @@ def run_migrations():
             "CREATE TABLE IF NOT EXISTS promo_code_redemptions (id TEXT PRIMARY KEY, promo_code_id TEXT NOT NULL, user_id TEXT, checkout_session_id TEXT NOT NULL UNIQUE, subscription_id TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)",
             "CREATE TABLE IF NOT EXISTS connected_accounts (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, provider TEXT NOT NULL, access_token TEXT NOT NULL, refresh_token TEXT, token_expiry DATETIME, email TEXT, auto_join INTEGER NOT NULL DEFAULT 1, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, UNIQUE (user_id, provider))",
             "ALTER TABLE users ADD COLUMN last_login_at DATETIME",
+            "CREATE TABLE IF NOT EXISTS subscription_plans (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, display_name TEXT NOT NULL, description TEXT, price_monthly INTEGER NOT NULL DEFAULT 0, currency TEXT NOT NULL DEFAULT 'usd', interval TEXT NOT NULL DEFAULT 'month', features_json TEXT, meetings_per_month INTEGER, audio_hours_per_month INTEGER, stripe_product_id TEXT, stripe_price_id TEXT, is_active INTEGER NOT NULL DEFAULT 1, is_popular INTEGER NOT NULL DEFAULT 0, sort_order INTEGER NOT NULL DEFAULT 0, created_by_id TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP)",
+            "ALTER TABLE subscription_plans ADD COLUMN meetings_per_month INTEGER",
+            "ALTER TABLE subscription_plans ADD COLUMN audio_hours_per_month INTEGER",
+            "ALTER TABLE subscription_plans ADD COLUMN max_workspaces INTEGER",
+            "ALTER TABLE subscription_plans ADD COLUMN max_members INTEGER",
         ]
     with engine.connect() as conn:
         for sql in migrations:

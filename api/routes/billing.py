@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
 
 from middleware.auth import get_db, get_current_user
-from models.user import PromoCode, PromoCodeRedemption, User
+from models.user import PromoCode, PromoCodeRedemption, SubscriptionPlan, User
 from schemas.billing import CheckoutIn, PortalIn, PromoCodeIn
 import services.billing as svc
 
@@ -16,7 +16,40 @@ APP_URL        = os.environ.get("APP_URL", "http://localhost:5174")
 
 
 @router.get("/plans")
-def list_plans():
+def list_plans(db: Session = Depends(get_db)):
+    import json as _json
+    db_plans = (
+        db.query(SubscriptionPlan)
+        .filter(SubscriptionPlan.is_active == True)
+        .order_by(SubscriptionPlan.sort_order, SubscriptionPlan.created_at)
+        .all()
+    )
+    if db_plans:
+        result = []
+        for p in db_plans:
+            features = []
+            if p.features_json:
+                try:
+                    features = _json.loads(p.features_json)
+                except Exception:
+                    pass
+            result.append({
+                "name":                  p.name,
+                "display_name":          p.display_name,
+                "description":           p.description or "",
+                "price_monthly":         p.price_monthly,
+                "currency":              (p.currency or "usd").lower(),
+                "interval":              p.interval or "month",
+                "features":              features,
+                "meetings_per_month":    p.meetings_per_month,
+                "audio_hours_per_month": p.audio_hours_per_month,
+                "stripe_price_id":       p.stripe_price_id,
+                "is_popular":            bool(p.is_popular),
+                "sort_order":            p.sort_order or 0,
+            })
+        return result
+
+    # Fall back to Stripe-based listing when no DB plans exist
     if not stripe.api_key:
         return []
     plans = []
@@ -36,19 +69,21 @@ def list_plans():
             recurring = getattr(price, "recurring", None)
             interval  = getattr(recurring, "interval", None) if recurring else None
             plans.append({
-                "key":         plan_key,
-                "price_id":    price_id,
-                "name":        getattr(product, "name", plan_key.title()),
-                "description": getattr(product, "description", "") or "",
-                "price":       svc.fmt_price(price.unit_amount or 0, price.currency or "gbp"),
-                "amount":      price.unit_amount or 0,
-                "currency":    (price.currency or "gbp").upper(),
-                "interval":    interval,
-                "features":    features,
+                "name":          plan_key,
+                "display_name":  getattr(product, "name", plan_key.title()),
+                "description":   getattr(product, "description", "") or "",
+                "price_monthly": price.unit_amount or 0,
+                "currency":      (price.currency or "gbp").lower(),
+                "interval":      interval,
+                "features":      features,
+                "stripe_price_id": price_id,
+                "is_popular":    False,
+                "meetings_per_month": None,
+                "audio_hours_per_month": None,
             })
         except Exception:
             continue
-    return sorted(plans, key=lambda p: p["amount"])
+    return sorted(plans, key=lambda p: p["price_monthly"])
 
 
 @router.post("/checkout")
@@ -57,7 +92,7 @@ def create_checkout(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    price = svc.get_price_for_plan(body.plan)
+    price = svc.get_price_for_plan(body.plan, db)
     customer_id = svc.get_or_create_customer(db, current_user)
     base = (body.origin or APP_URL).rstrip("/")
     metadata = {"user_id": current_user.id}
@@ -98,7 +133,7 @@ def validate_promocode(
         "remaining_uses": None if promo.max_uses is None else max(promo.max_uses - promo.uses_count, 0),
     }
     if body.plan:
-        response.update(svc.promo_preview(promo, svc.get_price_for_plan(body.plan)))
+        response.update(svc.promo_preview(promo, svc.get_price_for_plan(body.plan, db)))
     return response
 
 
@@ -149,7 +184,7 @@ def get_subscription(
         recurring = getattr(price, "recurring", None)
         return {
             "id":                   sub.id,
-            "plan":                 svc.PLAN_FROM_PRICE.get(price.id, current_user.plan),
+            "plan":                 svc.plan_name_from_price_id(price.id, db, default=current_user.plan),
             "plan_name":            getattr(product, "name", current_user.plan.title()),
             "status":               sub.status,
             "current_period_start": period_start,
@@ -188,7 +223,7 @@ def sync_subscription(
 
         sub      = subs.data[0]
         price_id = sub.items.data[0].price.id
-        plan     = svc.PLAN_FROM_PRICE.get(price_id, current_user.plan)
+        plan     = svc.plan_name_from_price_id(price_id, db, default=current_user.plan)
         current_user.plan = plan
         current_user.stripe_subscription_id = sub.id
         db.commit()
@@ -256,7 +291,7 @@ async def stripe_webhook(request: Request, db: Session = Depends(get_db)):
         if user_id and sub_id:
             sub      = stripe.Subscription.retrieve(sub_id)
             price_id = sub["items"]["data"][0]["price"]["id"]
-            plan     = svc.PLAN_FROM_PRICE.get(price_id, "pro")
+            plan     = svc.plan_name_from_price_id(price_id, db)
             user = db.query(User).filter(User.id == user_id).first()
             if user:
                 user.plan = plan
@@ -276,7 +311,7 @@ async def stripe_webhook(request: Request, db: Session = Depends(get_db)):
                 user.stripe_subscription_id = None
             else:
                 price_id = data["items"]["data"][0]["price"]["id"]
-                user.plan = svc.PLAN_FROM_PRICE.get(price_id, user.plan)
+                user.plan = svc.plan_name_from_price_id(price_id, db, default=user.plan)
             db.commit()
 
     return {"received": True}

@@ -99,3 +99,28 @@ class PromoCodeRedemption(Base):
     checkout_session_id = Column(String, nullable=False, unique=True, index=True)
     subscription_id     = Column(String, nullable=True, index=True)
     created_at          = Column(DateTime, server_default=func.now())
+
+
+class SubscriptionPlan(Base):
+    __tablename__ = "subscription_plans"
+
+    id                 = Column(String, primary_key=True, default=_uuid)
+    name               = Column(String, nullable=False, unique=True, index=True)  # internal key e.g. 'pro'
+    display_name       = Column(String, nullable=False)
+    description        = Column(String, nullable=True)
+    price_monthly      = Column(Integer, nullable=False, default=0)   # in cents
+    currency           = Column(String, nullable=False, default="usd")
+    interval           = Column(String, nullable=False, default="month")  # month | year
+    features_json         = Column(String, nullable=True)   # JSON array of feature strings
+    meetings_per_month    = Column(Integer, nullable=True)   # NULL = unlimited
+    audio_hours_per_month = Column(Integer, nullable=True)   # NULL = unlimited
+    max_workspaces        = Column(Integer, nullable=True)   # NULL = unlimited
+    max_members           = Column(Integer, nullable=True)   # NULL = unlimited per workspace
+    stripe_product_id     = Column(String, nullable=True, index=True)
+    stripe_price_id       = Column(String, nullable=True, index=True)
+    is_active             = Column(Boolean, nullable=False, default=True)
+    is_popular            = Column(Boolean, nullable=False, default=False)
+    sort_order            = Column(Integer, nullable=False, default=0)
+    created_by_id      = Column(String, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    created_at         = Column(DateTime, server_default=func.now())
+    updated_at         = Column(DateTime, server_default=func.now(), onupdate=datetime.utcnow)

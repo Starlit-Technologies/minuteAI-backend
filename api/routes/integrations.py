@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 import requests
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
@@ -38,15 +38,16 @@ _ZOOM_AUTH_URL  = "https://zoom.us/oauth/authorize"
 _ZOOM_TOKEN_URL = "https://zoom.us/oauth/token"
 
 
-def _make_state(user_id: str) -> str:
+def _make_state(user_id: str, origin: str = "") -> str:
     from jose import jwt
-    return jwt.encode({"sub": user_id, "exp": time.time() + 600}, JWT_SECRET, algorithm="HS256")
+    return jwt.encode({"sub": user_id, "ori": origin, "exp": time.time() + 600}, JWT_SECRET, algorithm="HS256")
 
 
-def _decode_state(state: str) -> Optional[str]:
+def _decode_state(state: str) -> Optional[dict]:
     from jose import jwt, JWTError
     try:
-        return jwt.decode(state, JWT_SECRET, algorithms=["HS256"])["sub"]
+        payload = jwt.decode(state, JWT_SECRET, algorithms=["HS256"])
+        return {"user_id": payload["sub"], "origin": payload.get("ori", "")}
     except JWTError:
         return None
 
@@ -67,8 +68,8 @@ def get_integrations(user: User = Depends(get_current_user)):
 # ── Google ────────────────────────────────────────────────────────────────────
 
 @router.get("/connect/google")
-def connect_google(user: User = Depends(get_current_user)):
-    state = _make_state(user.id)
+def connect_google(origin: str = Query(default=""), user: User = Depends(get_current_user)):
+    state = _make_state(user.id, origin)
     params = {
         "client_id": GOOGLE_CLIENT_ID,
         "redirect_uri": f"{BACKEND_URL}/integrations/callback/google",
@@ -83,12 +84,16 @@ def connect_google(user: User = Depends(get_current_user)):
 
 @router.get("/callback/google")
 def callback_google(code: str = None, state: str = None, error: str = None):
-    if error or not code or not state:
-        return RedirectResponse(f"{FRONTEND_URL}/settings?tab=integrations&error=google_denied")
+    decoded = _decode_state(state) if state else None
+    base = (decoded or {}).get("origin") or FRONTEND_URL
 
-    user_id = _decode_state(state)
-    if not user_id:
-        return RedirectResponse(f"{FRONTEND_URL}/settings?tab=integrations&error=invalid_state")
+    if error or not code or not state:
+        return RedirectResponse(f"{base}/settings?tab=integrations&error=google_denied")
+
+    if not decoded:
+        return RedirectResponse(f"{base}/settings?tab=integrations&error=invalid_state")
+
+    user_id = decoded["user_id"]
 
     token_res = requests.post(_GOOGLE_TOKEN_URL, data={
         "code": code,
@@ -98,7 +103,7 @@ def callback_google(code: str = None, state: str = None, error: str = None):
         "grant_type": "authorization_code",
     })
     if not token_res.ok:
-        return RedirectResponse(f"{FRONTEND_URL}/settings?tab=integrations&error=google_token")
+        return RedirectResponse(f"{base}/settings?tab=integrations&error=google_token")
 
     tokens = token_res.json()
     access_token  = tokens["access_token"]
@@ -118,14 +123,14 @@ def callback_google(code: str = None, state: str = None, error: str = None):
         access_token=access_token, refresh_token=refresh_token,
         token_expiry=expiry, email=email,
     )
-    return RedirectResponse(f"{FRONTEND_URL}/settings?tab=integrations&connected=google")
+    return RedirectResponse(f"{base}/settings?tab=integrations&connected=google")
 
 
 # ── Zoom ──────────────────────────────────────────────────────────────────────
 
 @router.get("/connect/zoom")
-def connect_zoom(user: User = Depends(get_current_user)):
-    state = _make_state(user.id)
+def connect_zoom(origin: str = Query(default=""), user: User = Depends(get_current_user)):
+    state = _make_state(user.id, origin)
     params = {
         "client_id": ZOOM_CLIENT_ID,
         "redirect_uri": f"{BACKEND_URL}/integrations/callback/zoom",
@@ -137,12 +142,16 @@ def connect_zoom(user: User = Depends(get_current_user)):
 
 @router.get("/callback/zoom")
 def callback_zoom(code: str = None, state: str = None, error: str = None):
-    if error or not code or not state:
-        return RedirectResponse(f"{FRONTEND_URL}/settings?tab=integrations&error=zoom_denied")
+    decoded = _decode_state(state) if state else None
+    base = (decoded or {}).get("origin") or FRONTEND_URL
 
-    user_id = _decode_state(state)
-    if not user_id:
-        return RedirectResponse(f"{FRONTEND_URL}/settings?tab=integrations&error=invalid_state")
+    if error or not code or not state:
+        return RedirectResponse(f"{base}/settings?tab=integrations&error=zoom_denied")
+
+    if not decoded:
+        return RedirectResponse(f"{base}/settings?tab=integrations&error=invalid_state")
+
+    user_id = decoded["user_id"]
 
     credentials = base64.b64encode(f"{ZOOM_CLIENT_ID}:{ZOOM_CLIENT_SECRET}".encode()).decode()
     token_res = requests.post(
@@ -155,7 +164,7 @@ def callback_zoom(code: str = None, state: str = None, error: str = None):
         },
     )
     if not token_res.ok:
-        return RedirectResponse(f"{FRONTEND_URL}/settings?tab=integrations&error=zoom_token")
+        return RedirectResponse(f"{base}/settings?tab=integrations&error=zoom_token")
 
     tokens = token_res.json()
     access_token  = tokens["access_token"]
@@ -175,7 +184,7 @@ def callback_zoom(code: str = None, state: str = None, error: str = None):
         access_token=access_token, refresh_token=refresh_token,
         token_expiry=expiry, email=email,
     )
-    return RedirectResponse(f"{FRONTEND_URL}/settings?tab=integrations&connected=zoom")
+    return RedirectResponse(f"{base}/settings?tab=integrations&connected=zoom")
 
 
 # ── Manage ────────────────────────────────────────────────────────────────────

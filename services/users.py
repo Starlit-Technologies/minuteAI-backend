@@ -5,15 +5,30 @@ from passlib.context import CryptContext
 from sqlalchemy.orm import Session
 
 from models.job import JobRecord
-from models.user import User
+from models.user import SubscriptionPlan, User
 
 _pwd = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-PLAN_LIMITS = {
-    "free":  {"meetings": 3,   "hours": 5},
-    "pro":   {"meetings": 50,  "hours": 100},
-    "team":  {"meetings": 200, "hours": 500},
+_FALLBACK_LIMITS = {
+    "free":  {"meetings": 3,   "hours": 5,   "workspaces": 1, "members": 3},
+    "pro":   {"meetings": 50,  "hours": 100, "workspaces": 3, "members": 10},
+    "team":  {"meetings": 200, "hours": 500, "workspaces": None, "members": None},
 }
+
+
+def _plan_limits(db: Session, plan_name: str) -> dict:
+    row = db.query(SubscriptionPlan).filter(
+        SubscriptionPlan.name == plan_name,
+        SubscriptionPlan.is_active == True,
+    ).first()
+    if row:
+        return {
+            "meetings":   row.meetings_per_month,    # None = unlimited
+            "hours":      row.audio_hours_per_month, # None = unlimited
+            "workspaces": row.max_workspaces,        # None = unlimited
+            "members":    row.max_members,           # None = unlimited
+        }
+    return _FALLBACK_LIMITS.get(plan_name, _FALLBACK_LIMITS["free"])
 
 
 def update_profile(db: Session, user: User, name: str, email: str) -> dict:
@@ -83,11 +98,13 @@ def get_usage(db: Session, user: User) -> dict:
         .filter(JobRecord.user_id == user.id, JobRecord.status == "done")
         .all()
     )
-    limits = PLAN_LIMITS.get(user.plan, PLAN_LIMITS["free"])
+    limits = _plan_limits(db, user.plan or "free")
     return {
-        "plan":           user.plan,
-        "meetings_used":  len(done_jobs),
-        "meetings_limit": limits["meetings"],
-        "hours_used":     0,
-        "hours_limit":    limits["hours"],
+        "plan":            user.plan or "free",
+        "meetings_used":   len(done_jobs),
+        "meetings_limit":  limits["meetings"],    # None = unlimited
+        "hours_used":      0,
+        "hours_limit":     limits["hours"],       # None = unlimited
+        "max_workspaces":  limits["workspaces"],  # None = unlimited
+        "max_members":     limits["members"],     # None = unlimited
     }

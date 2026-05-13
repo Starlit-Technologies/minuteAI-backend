@@ -7,10 +7,13 @@ from typing import Optional
 import aiofiles
 from fastapi import APIRouter, Depends, UploadFile, File, Form, HTTPException
 
-from middleware.auth import get_optional_user
-from models.job import Job, store
+from sqlalchemy.orm import Session
+
+from middleware.auth import get_db, get_optional_user
+from models.job import Job, JobRecord, store
 from models.user import User
 from services.processing_pipeline import start_pipeline
+from services.users import _plan_limits
 
 router = APIRouter()
 
@@ -34,8 +37,24 @@ async def init_upload(
     custom_instructions: Optional[str] = Form(None),
     template: Optional[str] = Form("standard"),
     output_language: Optional[str] = Form("en"),
+    db: Session = Depends(get_db),
     current_user: Optional[User] = Depends(get_optional_user),
 ):
+    # Enforce plan meeting limits for authenticated users
+    if current_user:
+        limits = _plan_limits(db, current_user.plan or "free")
+        meetings_limit = limits.get("meetings")
+        if meetings_limit is not None:
+            used = db.query(JobRecord).filter(
+                JobRecord.user_id == current_user.id,
+                JobRecord.status == "done",
+            ).count()
+            if used >= meetings_limit:
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"You have used all {meetings_limit} meetings included in your plan. Upgrade to continue.",
+                )
+
     job_id = str(uuid.uuid4())
     (CHUNK_DIR / job_id).mkdir(parents=True, exist_ok=True)
 

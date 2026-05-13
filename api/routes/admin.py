@@ -8,16 +8,16 @@ from middleware.auth import get_admin_user, get_db
 from models.job import JobRecord
 from models.notification import NotificationRecord
 from models.task import TaskRecord
-from models.user import AdminGrant, OTPCode, PromoCode, TeamMember, User, Workspace
+from models.user import AdminGrant, OTPCode, PromoCode, SubscriptionPlan, TeamMember, User, Workspace
 from schemas.admin import (
-    CreateAdminGrantIn, CreatePromoCodeIn, UpdateAdminTaskIn,
-    UpdateAdminUserIn, UpdateAdminWorkspaceIn, UpdatePromoCodeIn,
+    CreateAdminGrantIn, CreatePlanIn, CreatePromoCodeIn, UpdateAdminTaskIn,
+    UpdateAdminUserIn, UpdateAdminWorkspaceIn, UpdatePlanIn, UpdatePromoCodeIn,
 )
 import services.admin as svc
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
-VALID_PLANS = {"free", "pro", "team"}
+VALID_PLANS = {"free", "pro", "team"}  # used only as fallback; DB plans take precedence
 VALID_TASK_STATUSES = {"todo", "in_progress", "done"}
 VALID_PROMO_TYPES = {"percent", "fixed"}
 
@@ -90,11 +90,9 @@ def admin_overview(db: Session = Depends(get_db), _: User = Depends(get_admin_us
     meetings  = db.query(JobRecord).all()
     tasks     = db.query(TaskRecord).all()
 
-    plan_breakdown  = {
-        "free": sum(1 for u in users if (u.plan or "free") == "free"),
-        "pro":  sum(1 for u in users if u.plan == "pro"),
-        "team": sum(1 for u in users if u.plan == "team"),
-    }
+    from collections import Counter
+    plan_counts = Counter((u.plan or "free") for u in users)
+    plan_breakdown = dict(plan_counts)
     meeting_status = {
         "done":       sum(1 for m in meetings if m.status == "done"),
         "processing": sum(1 for m in meetings if m.status not in {"done", "error"}),
@@ -105,8 +103,11 @@ def admin_overview(db: Session = Depends(get_db), _: User = Depends(get_admin_us
         "in_progress": sum(1 for t in tasks if t.status == "in_progress"),
         "done":        sum(1 for t in tasks if t.status == "done"),
     }
+    free_plan_names = {
+        p.name for p in db.query(SubscriptionPlan).filter(SubscriptionPlan.price_monthly == 0).all()
+    } | {"free"}
     billing = {
-        "paid_customers":       sum(1 for u in users if u.plan in {"pro", "team"}),
+        "paid_customers":       sum(1 for u in users if (u.plan or "free") not in free_plan_names),
         "stripe_customers":     sum(1 for u in users if bool(u.stripe_customer_id)),
         "active_subscriptions": sum(1 for u in users if bool(u.stripe_subscription_id)),
     }
@@ -225,8 +226,13 @@ def admin_update_user(
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Name cannot be empty.")
         user.name = body.name.strip()
     if body.plan is not None:
-        if body.plan not in VALID_PLANS:
-            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Plan must be one of: free, pro, team.")
+        db_plan_names = {p.name for p in db.query(SubscriptionPlan).all()}
+        allowed = db_plan_names | VALID_PLANS
+        if body.plan not in allowed:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                f"'{body.plan}' is not a recognised plan. Create it in the Plans section first.",
+            )
         user.plan = body.plan
     if body.email_verified is not None:
         user.email_verified = body.email_verified
@@ -627,4 +633,143 @@ def admin_delete_promo_code(promo_id: str, db: Session = Depends(get_db), _: Use
     if not promo:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Promo code not found.")
     db.delete(promo)
+    db.commit()
+
+
+# ── Subscription Plans ────────────────────────────────────────────────────────
+
+@router.get("/plans")
+def admin_list_plans(db: Session = Depends(get_db), _: User = Depends(get_admin_user)):
+    plans = db.query(SubscriptionPlan).order_by(SubscriptionPlan.sort_order, SubscriptionPlan.created_at).all()
+    rows = [svc.plan_row(p, db) for p in plans]
+    return {
+        "stats": {
+            "total":         len(rows),
+            "active":        sum(1 for r in rows if r["is_active"]),
+            "stripe_synced": sum(1 for r in rows if r["stripe_synced"]),
+            "free_plans":    sum(1 for r in rows if r["price_monthly"] == 0),
+        },
+        "plans": rows,
+    }
+
+
+@router.get("/plans/{plan_id}")
+def admin_get_plan(plan_id: str, db: Session = Depends(get_db), _: User = Depends(get_admin_user)):
+    plan = db.get(SubscriptionPlan, plan_id)
+    if not plan:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Plan not found.")
+    return svc.plan_row(plan, db)
+
+
+@router.post("/plans", status_code=201)
+def admin_create_plan(
+    body: CreatePlanIn,
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(get_admin_user),
+):
+    import json as _json
+    name_key = body.name.strip().lower().replace(" ", "_")
+    if not name_key:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Plan name is required.")
+    if body.price_monthly < 0:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Price cannot be negative.")
+    if db.query(SubscriptionPlan).filter(SubscriptionPlan.name == name_key).first():
+        raise HTTPException(status.HTTP_409_CONFLICT, "A plan with this name already exists.")
+
+    plan = SubscriptionPlan(
+        name=name_key,
+        display_name=body.display_name.strip(),
+        description=body.description.strip() if body.description else None,
+        price_monthly=body.price_monthly,
+        currency=body.currency.lower(),
+        interval=body.interval,
+        features_json=_json.dumps(body.features),
+        meetings_per_month=body.meetings_per_month,
+        audio_hours_per_month=body.audio_hours_per_month,
+        max_workspaces=body.max_workspaces,
+        max_members=body.max_members,
+        is_active=True,
+        is_popular=body.is_popular,
+        sort_order=body.sort_order,
+        created_by_id=current_admin.id,
+    )
+    db.add(plan)
+    db.commit()
+    db.refresh(plan)
+
+    if body.sync_stripe and body.price_monthly >= 0:
+        try:
+            svc.sync_plan_to_stripe(plan, db)
+            db.refresh(plan)
+        except Exception as exc:
+            # Plan was saved; Stripe sync failed — return with warning
+            row = svc.plan_row(plan, db)
+            row["stripe_warning"] = str(exc)
+            return row
+
+    return svc.plan_row(plan, db)
+
+
+@router.patch("/plans/{plan_id}")
+def admin_update_plan(
+    plan_id: str,
+    body: UpdatePlanIn,
+    db: Session = Depends(get_db),
+    _: User = Depends(get_admin_user),
+):
+    import json as _json
+    plan = db.get(SubscriptionPlan, plan_id)
+    if not plan:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Plan not found.")
+
+    if body.display_name is not None:
+        plan.display_name = body.display_name.strip()
+    if body.description is not None:
+        plan.description = body.description.strip() if body.description else None
+    if body.price_monthly is not None:
+        if body.price_monthly < 0:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Price cannot be negative.")
+        plan.price_monthly = body.price_monthly
+    if body.currency is not None:
+        plan.currency = body.currency.lower()
+    if body.interval is not None:
+        plan.interval = body.interval
+    if body.features is not None:
+        plan.features_json = _json.dumps(body.features)
+    if body.is_active is not None:
+        plan.is_active = body.is_active
+    if body.is_popular is not None:
+        plan.is_popular = body.is_popular
+    if body.sort_order is not None:
+        plan.sort_order = body.sort_order
+    if "meetings_per_month" in body.__fields_set__:
+        plan.meetings_per_month = body.meetings_per_month
+    if "audio_hours_per_month" in body.__fields_set__:
+        plan.audio_hours_per_month = body.audio_hours_per_month
+    if "max_workspaces" in body.__fields_set__:
+        plan.max_workspaces = body.max_workspaces
+    if "max_members" in body.__fields_set__:
+        plan.max_members = body.max_members
+
+    db.commit()
+    db.refresh(plan)
+
+    if body.sync_stripe:
+        try:
+            svc.sync_plan_to_stripe(plan, db)
+            db.refresh(plan)
+        except Exception as exc:
+            row = svc.plan_row(plan, db)
+            row["stripe_warning"] = str(exc)
+            return row
+
+    return svc.plan_row(plan, db)
+
+
+@router.delete("/plans/{plan_id}", status_code=204)
+def admin_delete_plan(plan_id: str, db: Session = Depends(get_db), _: User = Depends(get_admin_user)):
+    plan = db.get(SubscriptionPlan, plan_id)
+    if not plan:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Plan not found.")
+    db.delete(plan)
     db.commit()

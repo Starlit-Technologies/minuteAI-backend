@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from models.job import JobRecord
 from models.task import TaskRecord
-from models.user import AdminGrant, PromoCode, TeamMember, User, Workspace
+from models.user import AdminGrant, PromoCode, SubscriptionPlan, TeamMember, User, Workspace
 
 
 def configured_admin_emails() -> set[str]:
@@ -192,3 +192,66 @@ def parse_datetime(value: Optional[str]) -> Optional[datetime]:
     if not value:
         return None
     return datetime.fromisoformat(value.replace("Z", "+00:00")).replace(tzinfo=None)
+
+
+def plan_row(plan: SubscriptionPlan, db: Session) -> dict:
+    creator = db.get(User, plan.created_by_id) if plan.created_by_id else None
+    features = []
+    if plan.features_json:
+        try:
+            features = json.loads(plan.features_json)
+        except Exception:
+            features = []
+    return {
+        "id": plan.id,
+        "name": plan.name,
+        "display_name": plan.display_name,
+        "description": plan.description,
+        "price_monthly": plan.price_monthly,
+        "currency": (plan.currency or "usd").lower(),
+        "interval": plan.interval or "month",
+        "features": features,
+        "meetings_per_month":    plan.meetings_per_month,     # None = unlimited
+        "audio_hours_per_month": plan.audio_hours_per_month,  # None = unlimited
+        "max_workspaces":        plan.max_workspaces,         # None = unlimited
+        "max_members":           plan.max_members,            # None = unlimited
+        "stripe_product_id": plan.stripe_product_id,
+        "stripe_price_id": plan.stripe_price_id,
+        "stripe_synced": bool(plan.stripe_product_id and plan.stripe_price_id),
+        "is_active": bool(plan.is_active),
+        "is_popular": bool(plan.is_popular),
+        "sort_order": plan.sort_order or 0,
+        "created_by_name": creator.name if creator else None,
+        "created_at": plan.created_at.isoformat() if plan.created_at else None,
+        "updated_at": plan.updated_at.isoformat() if plan.updated_at else None,
+    }
+
+
+def sync_plan_to_stripe(plan: SubscriptionPlan, db: Session):
+    import os, stripe as _stripe
+    _stripe.api_key = os.environ.get("STRIPE_SECRET_KEY", "")
+    if not _stripe.api_key:
+        raise ValueError("STRIPE_SECRET_KEY is not configured.")
+
+    if plan.stripe_product_id:
+        kwargs: dict = {"name": plan.display_name}
+        if plan.description:
+            kwargs["description"] = plan.description
+        _stripe.Product.modify(plan.stripe_product_id, **kwargs)
+    else:
+        kwargs = {"name": plan.display_name, "metadata": {"plan_name": plan.name, "plan_id": plan.id}}
+        if plan.description:
+            kwargs["description"] = plan.description
+        product = _stripe.Product.create(**kwargs)
+        plan.stripe_product_id = product.id
+
+    # Stripe prices are immutable — always create a new one when price/interval changes
+    price = _stripe.Price.create(
+        product=plan.stripe_product_id,
+        unit_amount=plan.price_monthly,
+        currency=(plan.currency or "usd").lower(),
+        recurring={"interval": plan.interval or "month"},
+        metadata={"plan_name": plan.name, "plan_id": plan.id},
+    )
+    plan.stripe_price_id = price.id
+    db.commit()

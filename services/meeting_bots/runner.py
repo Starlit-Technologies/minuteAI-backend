@@ -31,6 +31,9 @@ except Exception:
 DEBUG_DIR   = Path(__file__).parent.parent.parent / "storage" / "meeting_bot_debug"
 CAPTURE_DIR = Path(__file__).parent.parent.parent / "storage" / "meeting_bot_captures"
 
+GOOGLE_CLIENT_ID     = os.environ.get("GOOGLE_CLIENT_ID", "")
+GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "")
+
 MEETING_BOT_MODE            = os.environ.get("MEETING_BOT_MODE", "playwright").strip().lower()
 MEETING_BOT_RECORDER_NAME   = os.environ.get("MEETING_BOT_RECORDER_NAME", "MinuteAI Recorder").strip() or "MinuteAI Recorder"
 MEETING_BOT_RECORD_SECONDS  = int(os.environ.get("MEETING_BOT_RECORD_SECONDS", "1800"))
@@ -163,6 +166,7 @@ _AUDIO_CAPTURE_SCRIPT = r"""
 @dataclass
 class BotRunContext:
     session_id: str
+    user_id: str
     meeting_url: str
     bot_name: str
     platform: str
@@ -309,6 +313,56 @@ _FILL_NAME_JS = """
     return null;
 }
 """
+
+
+async def _sign_in_google_meet(page, user_id: str, session_id: str) -> bool:
+    """
+    Uses the user's stored Google OAuth token to sign the browser into Google
+    before joining Meet. Works on any deployment — no persistent profile needed.
+    Returns True if sign-in succeeded.
+    """
+    import requests as _req
+    from datetime import timezone
+    from models.connected_account import get_connected_account
+
+    if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
+        return False
+
+    account = get_connected_account(user_id, "google")
+    if not account or not account.refresh_token:
+        return False
+
+    # Refresh the access token so we always have a valid one
+    try:
+        resp = _req.post("https://oauth2.googleapis.com/token", data={
+            "client_id": GOOGLE_CLIENT_ID,
+            "client_secret": GOOGLE_CLIENT_SECRET,
+            "refresh_token": account.refresh_token,
+            "grant_type": "refresh_token",
+        }, timeout=15)
+        if not resp.ok:
+            return False
+        access_token = resp.json().get("access_token")
+        if not access_token:
+            return False
+    except Exception:
+        return False
+
+    # Exchange the OAuth access token for a Google browser session
+    try:
+        login_url = (
+            f"https://accounts.google.com/OAuthLogin"
+            f"?source=ogb&issuedTo={GOOGLE_CLIENT_ID}&token={access_token}"
+        )
+        await page.goto(login_url, wait_until="domcontentloaded", timeout=20000)
+        await page.wait_for_timeout(2000)
+        title = await page.title()
+        signed_in = "accounts.google.com" not in page.url or "myaccount" in page.url or "google.com" in page.url
+        _log(session_id, f"Google sign-in via OAuth — page: {title!r} signed_in={signed_in}")
+        return True
+    except Exception as exc:
+        _log(session_id, f"Google OAuth sign-in failed (non-fatal): {exc}")
+        return False
 
 
 async def _prepare_google_meet(page, meeting_url: str, bot_name: str, session_id: str):
@@ -633,7 +687,8 @@ async def _wait_for_admission(page, session_id: str, platform: str) -> bool:
             if blocked:
                 raise RuntimeError(
                     f"Google Meet blocked the bot: {blocked}. "
-                    "The meeting may be restricted to signed-in accounts only."
+                    "The meeting is restricted to signed-in accounts. "
+                    "Connect your Google account in Settings → Integrations so the bot can join as you."
                 )
             signals = [
                 page.get_by_role("button", name="Leave call"),
@@ -767,6 +822,9 @@ async def _run_playwright_session(ctx: BotRunContext):
                 await _take_debug_screenshot(page, ctx.session_id, "landing")
 
                 if ctx.platform == "google_meet":
+                    signed_in = await _sign_in_google_meet(page, ctx.user_id, ctx.session_id)
+                    if signed_in:
+                        _log(ctx.session_id, "Signed into Google — joining as authenticated user")
                     await _prepare_google_meet(page, ctx.meeting_url, ctx.bot_name, ctx.session_id)
                     await _take_debug_screenshot(page, ctx.session_id, "prejoin")
                     await _join_google_meet(page, ctx.session_id)
@@ -910,6 +968,7 @@ def _run_session(session_id: str):
 
     ctx = BotRunContext(
         session_id=session.id,
+        user_id=session.user_id,
         meeting_url=session.meeting_url,
         bot_name=session.bot_name or MEETING_BOT_RECORDER_NAME,
         platform=platform,

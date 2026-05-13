@@ -7,11 +7,11 @@ from middleware.auth import get_db, get_current_user
 from models.bot_account import ensure_workspace_bot_account
 from models.user import User, Workspace, TeamMember
 from schemas.workspaces import CreateWorkspaceIn, InviteIn, RenameWorkspaceIn, UpdateRoleIn
+from services.users import _plan_limits
 from services.workspaces import bot_dict, get_accessible_workspace, member_dict, ws_dict
 
 router = APIRouter(prefix="/workspaces", tags=["workspaces"])
 
-WORKSPACE_LIMITS = {"free": 1, "pro": 3, "team": 999}
 VALID_ROLES = {"admin", "member", "viewer"}
 
 
@@ -64,13 +64,15 @@ def create_workspace(
     current_user: User = Depends(get_current_user),
 ):
     plan  = current_user.plan or "free"
-    limit = WORKSPACE_LIMITS.get(plan, 1)
-    count = db.query(Workspace).filter(Workspace.owner_id == current_user.id).count()
-    if count >= limit:
-        raise HTTPException(
-            status.HTTP_403_FORBIDDEN,
-            f"Your {plan} plan allows up to {limit} workspace(s). Upgrade to create more.",
-        )
+    limits = _plan_limits(db, plan)
+    ws_limit = limits.get("workspaces", 1)
+    if ws_limit is not None:
+        count = db.query(Workspace).filter(Workspace.owner_id == current_user.id).count()
+        if count >= ws_limit:
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN,
+                f"Your plan allows up to {ws_limit} workspace(s). Upgrade to create more.",
+            )
     ws = Workspace(name=body.name.strip(), owner_id=current_user.id)
     db.add(ws)
     db.commit()
@@ -156,6 +158,22 @@ def invite_member(
 
     if body.role not in VALID_ROLES:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Role must be one of: {', '.join(VALID_ROLES)}")
+
+    # Enforce member limit based on workspace owner's plan
+    ws_owner = db.query(User).filter(User.id == ws.owner_id).first()
+    owner_plan = (ws_owner.plan if ws_owner else None) or "free"
+    member_limit = _plan_limits(db, owner_plan).get("members")
+    if member_limit is not None:
+        current_count = db.query(TeamMember).filter(
+            TeamMember.workspace_id == workspace_id,
+            TeamMember.status.in_(["active", "pending"]),
+        ).count()
+        if current_count >= member_limit:
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN,
+                f"Your plan allows up to {member_limit} member(s) per workspace. Upgrade to invite more.",
+            )
+
     if body.email == current_user.email:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "You cannot invite yourself.")
     if body.email == (db.query(User).filter(User.id == ws.owner_id).first() or User()).email:

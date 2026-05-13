@@ -1,15 +1,17 @@
 import os
 from datetime import datetime
+from typing import Optional
 
 import stripe
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
-from models.user import PromoCode, PromoCodeRedemption, User
+from models.user import PromoCode, PromoCodeRedemption, SubscriptionPlan, User
 
 stripe.api_key = os.environ.get("STRIPE_SECRET_KEY", "")
 APP_URL        = os.environ.get("APP_URL", "http://localhost:5174")
 
+# Env-var fallback price IDs (used when DB has no plans yet)
 PRICE_IDS = {
     "pro":  os.environ.get("STRIPE_PRO_PRICE_ID",  ""),
     "team": os.environ.get("STRIPE_TEAM_PRICE_ID", ""),
@@ -37,14 +39,33 @@ def get_or_create_customer(db: Session, user: User) -> str:
     return customer.id
 
 
-def get_price_for_plan(plan: str):
-    price_id = PRICE_IDS.get(plan)
+def _db_price_id_for_plan(plan: str, db: Optional[Session]) -> Optional[str]:
+    if not db:
+        return None
+    row = db.query(SubscriptionPlan).filter(
+        SubscriptionPlan.name == plan,
+        SubscriptionPlan.is_active == True,
+        SubscriptionPlan.stripe_price_id.isnot(None),
+    ).first()
+    return row.stripe_price_id if row else None
+
+
+def get_price_for_plan(plan: str, db: Optional[Session] = None):
+    price_id = _db_price_id_for_plan(plan, db) or PRICE_IDS.get(plan)
     if not price_id:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid plan or Stripe not configured.")
     try:
         return stripe.Price.retrieve(price_id, expand=["product"])
     except Exception as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"Unable to retrieve billing plan: {exc}")
+
+
+def plan_name_from_price_id(price_id: str, db: Optional[Session] = None, default: str = "pro") -> str:
+    if db:
+        row = db.query(SubscriptionPlan).filter(SubscriptionPlan.stripe_price_id == price_id).first()
+        if row:
+            return row.name
+    return PLAN_FROM_PRICE.get(price_id, default)
 
 
 def validate_promo_code(db: Session, raw_code: str) -> PromoCode:
