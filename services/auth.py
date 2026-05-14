@@ -65,12 +65,13 @@ def _token_pair(user_id: str) -> dict:
 
 def _user_dict(user: User) -> dict:
     return {
-        "id":            user.id,
-        "name":          user.name,
-        "email":         user.email,
-        "plan":          user.plan,
-        "avatar_url":    user.avatar_url,
-        "last_login_at": user.last_login_at.isoformat() if user.last_login_at else None,
+        "id":                   user.id,
+        "name":                 user.name,
+        "email":                user.email,
+        "plan":                 user.plan,
+        "avatar_url":           user.avatar_url,
+        "last_login_at":        user.last_login_at.isoformat() if user.last_login_at else None,
+        "onboarding_completed": bool(user.onboarding_completed),
     }
 
 

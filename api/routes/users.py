@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from middleware.auth import get_db, get_current_user
 from models.job import JobRecord
 from models.user import User
-from schemas.users import ChangePasswordIn, UpdatePrefsIn, UpdateProfileIn
+from schemas.users import ChangePasswordIn, OnboardingIn, UpdatePrefsIn, UpdateProfileIn
 import services.users as svc
 
 router = APIRouter(prefix="/users", tags=["users"])
@@ -31,6 +31,15 @@ def change_password(
     current_user: User = Depends(get_current_user),
 ):
     return svc.change_password(db, current_user, body.current_password, body.new_password)
+
+
+@router.post("/me/onboarding")
+def complete_onboarding(
+    body: OnboardingIn,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    return svc.save_onboarding(db, current_user, body)
 
 
 @router.patch("/me/preferences")

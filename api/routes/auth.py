@@ -55,11 +55,12 @@ def reset_password(body: ResetPasswordIn, db: Session = Depends(get_db)):
 @router.get("/me")
 def me(current_user: User = Depends(get_current_user)):
     return {
-        "id":             current_user.id,
-        "name":           current_user.name,
-        "email":          current_user.email,
-        "plan":           current_user.plan,
-        "email_verified": current_user.email_verified,
-        "avatar_url":     current_user.avatar_url,
-        "last_login_at":  current_user.last_login_at.isoformat() if current_user.last_login_at else None,
+        "id":                   current_user.id,
+        "name":                 current_user.name,
+        "email":                current_user.email,
+        "plan":                 current_user.plan,
+        "email_verified":       current_user.email_verified,
+        "avatar_url":           current_user.avatar_url,
+        "last_login_at":        current_user.last_login_at.isoformat() if current_user.last_login_at else None,
+        "onboarding_completed": bool(current_user.onboarding_completed),
     }

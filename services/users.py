@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 from fastapi import HTTPException, UploadFile, status
@@ -6,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from models.job import JobRecord
 from models.user import SubscriptionPlan, User
+from schemas.users import OnboardingIn
 
 _pwd = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
@@ -59,6 +61,26 @@ def update_preferences(db: Session, user: User, timezone: str | None, language: 
         user.theme = theme
     db.commit()
     return {"timezone": user.timezone, "language": user.language, "theme": user.theme}
+
+
+def save_onboarding(db: Session, user: User, body: OnboardingIn) -> dict:
+    if body.meetingJoin is not None:
+        user.meeting_join = body.meetingJoin
+    if body.recapTo is not None:
+        user.recap_to = body.recapTo
+    if body.role is not None:
+        user.role = body.role
+    if body.title is not None:
+        user.title = body.title
+    if body.tools:
+        user.tools_json = json.dumps(body.tools)
+    if body.source is not None:
+        user.source = body.source
+    if body.language is not None:
+        user.language = body.language
+    user.onboarding_completed = True
+    db.commit()
+    return {"onboarding_completed": True}
 
 
 def get_preferences(user: User) -> dict:

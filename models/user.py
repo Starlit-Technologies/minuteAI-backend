@@ -24,6 +24,13 @@ class User(Base):
     stripe_subscription_id = Column(String, nullable=True)
     avatar_url            = Column(String, nullable=True)
     last_login_at         = Column(DateTime, nullable=True)
+    onboarding_completed  = Column(Boolean, nullable=False, default=False)
+    role                  = Column(String, nullable=True)
+    title                 = Column(String, nullable=True)
+    tools_json            = Column(String, nullable=True)   # JSON-encoded list
+    meeting_join          = Column(String, nullable=True)   # 'all' | 'own' | 'teammates' | 'invite'
+    recap_to              = Column(String, nullable=True)   # 'everyone' | 'team' | 'me'
+    source                = Column(String, nullable=True)
     created_at            = Column(DateTime, server_default=func.now())
     updated_at     = Column(DateTime, server_default=func.now(), onupdate=datetime.utcnow)
 

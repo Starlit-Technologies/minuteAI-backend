@@ -15,3 +15,14 @@ class UpdatePrefsIn(BaseModel):
     timezone: str | None = None
     language: str | None = None
     theme: str | None = None
+
+
+class OnboardingIn(BaseModel):
+    meetingJoin:  str | None = None
+    recapTo:      str | None = None
+    role:         str | None = None
+    title:        str | None = None
+    tools:        list[str]  = []
+    inviteEmails: str | None = None
+    source:       str | None = None
+    language:     str | None = None
