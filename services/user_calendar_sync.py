@@ -88,6 +88,15 @@ def _user_workspace(user_id: str) -> Optional[str]:
         return ws.id if ws else None
 
 
+def _fetch_google_events(token: str, time_min: str, time_max: str):
+    return requests.get(
+        _GOOGLE_CALENDAR_URL,
+        headers={"Authorization": f"Bearer {token}"},
+        params={"timeMin": time_min, "timeMax": time_max, "singleEvents": "true",
+                "orderBy": "startTime", "maxResults": 20},
+    )
+
+
 def _sync_google(account: ConnectedAccount):
     token = _valid_token(account)
     if not token:
@@ -97,14 +106,29 @@ def _sync_google(account: ConnectedAccount):
     time_min = now.strftime("%Y-%m-%dT%H:%M:%SZ")
     time_max = (now + timedelta(minutes=LOOKAHEAD_MINUTES)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    res = requests.get(
-        _GOOGLE_CALENDAR_URL,
-        headers={"Authorization": f"Bearer {token}"},
-        params={"timeMin": time_min, "timeMax": time_max, "singleEvents": "true",
-                "orderBy": "startTime", "maxResults": 20},
-    )
+    res = _fetch_google_events(token, time_min, time_max)
+
+    if res.status_code == 401:
+        # Token expired mid-flight — force a refresh and retry once
+        token = _refresh_google_token(account)
+        if not token:
+            logger.warning("Google Calendar: token refresh failed for user %s", account.user_id)
+            return
+        res = _fetch_google_events(token, time_min, time_max)
+
     if not res.ok:
-        logger.warning("Google Calendar fetch failed for user %s: %s", account.user_id, res.status_code)
+        try:
+            detail = res.json().get("error", {})
+            reason = detail.get("errors", [{}])[0].get("reason", "") or detail.get("status", "")
+            message = detail.get("message", res.text[:200])
+        except Exception:
+            reason, message = "", res.text[:200]
+        logger.warning(
+            "Google Calendar fetch failed for user %s: %s%s — %s",
+            account.user_id, res.status_code,
+            f" ({reason})" if reason else "",
+            message,
+        )
         return
 
     workspace_id = _user_workspace(account.user_id)

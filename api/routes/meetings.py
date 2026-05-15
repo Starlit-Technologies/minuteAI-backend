@@ -33,6 +33,35 @@ def meeting_stats(
     return get_meeting_stats(db, current_user.id, workspace_id)
 
 
+@router.get("/{job_id}/audio")
+def get_audio_url(
+    job_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Return a short-lived presigned URL to stream the meeting's original audio from R2."""
+    record = db.query(JobRecord).filter(
+        JobRecord.id == job_id, JobRecord.user_id == current_user.id
+    ).first()
+    if not record:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Meeting not found.")
+
+    r2_key = getattr(record, "r2_audio_key", None)
+    if not r2_key:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Audio not available — this meeting was processed before R2 was enabled.")
+
+    try:
+        from services.storage_r2 import get_presigned_url, _is_configured
+        if not _is_configured():
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Cloud storage is not configured on this server.")
+        url = get_presigned_url(r2_key, expires_in=3600)
+        return {"url": url, "expires_in": 3600}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, f"Could not generate audio URL: {exc}")
+
+
 @router.patch("/{job_id}/star")
 def toggle_star(
     job_id: str,
@@ -60,5 +89,15 @@ def delete_meeting(
     ).first()
     if not record:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Meeting not found.")
+
+    # Also remove from R2 if present
+    r2_key = getattr(record, "r2_audio_key", None)
+    if r2_key:
+        try:
+            from services.storage_r2 import delete_file
+            delete_file(r2_key)
+        except Exception:
+            pass
+
     db.delete(record)
     db.commit()

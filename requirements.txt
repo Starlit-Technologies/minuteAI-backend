@@ -19,3 +19,8 @@ email-validator
 stripe
 google-auth
 playwright==1.44.0
+boto3
+assemblyai
+deepL
+deepgram-sdk
+websockets

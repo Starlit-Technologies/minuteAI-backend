@@ -19,6 +19,7 @@ class JobRecord(Base):
     message      = Column(Text,    nullable=True)
     email        = Column(String,  nullable=True)
     audio_path   = Column(String,  nullable=True)
+    r2_audio_key = Column(String,  nullable=True)
     transcript   = Column(Text,    nullable=True)
     minutes_json = Column(Text,    nullable=True)
     docx_path    = Column(String,  nullable=True)
@@ -37,6 +38,7 @@ class Job:
     email: Optional[str] = None
     user_id: Optional[str] = None
     audio_path: Optional[str] = None
+    r2_audio_key: Optional[str] = None
     transcript: Optional[str] = None
     minutes: Optional[dict] = None
     docx_path: Optional[str] = None
@@ -52,7 +54,9 @@ def _record_to_job(r: JobRecord) -> Job:
     return Job(
         id=r.id, status=r.status, message=r.message, email=r.email,
         user_id=getattr(r, "user_id", None),
-        audio_path=r.audio_path, transcript=r.transcript,
+        audio_path=r.audio_path,
+        r2_audio_key=getattr(r, "r2_audio_key", None),
+        transcript=r.transcript,
         minutes=json.loads(r.minutes_json) if r.minutes_json else None,
         docx_path=r.docx_path, pdf_path=r.pdf_path,
         starred=bool(getattr(r, "starred", False)),

@@ -25,6 +25,8 @@ from api.routes.admin import router as admin_router
 from api.routes.meeting_bots import router as meeting_bots_router
 from api.routes.translate import router as translate_router
 from api.routes.integrations import router as integrations_router
+from api.routes.ws_live_translate import router as ws_live_translate_router
+from api.routes.steph import router as steph_router
 
 from models.job import store
 from db.init_db import create_tables, run_migrations, recover_stuck_jobs, recover_stuck_bot_sessions, seed_default_workspaces
@@ -77,6 +79,8 @@ app.include_router(admin_router)
 app.include_router(meeting_bots_router)
 app.include_router(translate_router)
 app.include_router(integrations_router)
+app.include_router(ws_live_translate_router)
+app.include_router(steph_router)
 app.include_router(billing_router)
 app.include_router(upload_router)
 app.include_router(status_router)

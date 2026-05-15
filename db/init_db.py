@@ -87,6 +87,7 @@ def run_migrations():
             "ALTER TABLE subscription_plans ADD COLUMN IF NOT EXISTS audio_hours_per_month INTEGER",
             "ALTER TABLE subscription_plans ADD COLUMN IF NOT EXISTS max_workspaces INTEGER",
             "ALTER TABLE subscription_plans ADD COLUMN IF NOT EXISTS max_members INTEGER",
+            "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS r2_audio_key TEXT",
         ]
     else:
         migrations = [
@@ -130,6 +131,7 @@ def run_migrations():
             "ALTER TABLE subscription_plans ADD COLUMN audio_hours_per_month INTEGER",
             "ALTER TABLE subscription_plans ADD COLUMN max_workspaces INTEGER",
             "ALTER TABLE subscription_plans ADD COLUMN max_members INTEGER",
+            "ALTER TABLE jobs ADD COLUMN r2_audio_key TEXT",
         ]
     with engine.connect() as conn:
         for sql in migrations:

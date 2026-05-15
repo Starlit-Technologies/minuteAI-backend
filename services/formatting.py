@@ -118,6 +118,10 @@ def _build_user_message(transcript: str, config: dict | None) -> str:
     if attendees:
         lines.append(f"Known attendees: {attendees}")
 
+    audio_duration = (config.get("_audio_duration") or "").strip()
+    if audio_duration:
+        lines.append(f"Exact meeting duration: {audio_duration} (use this for the duration metadata field)")
+
     custom = (config.get("custom_instructions") or "").strip()
     if custom:
         lines.append(f"Additional instructions: {custom}")

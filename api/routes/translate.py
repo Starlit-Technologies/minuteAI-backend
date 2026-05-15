@@ -1,14 +1,40 @@
+"""
+Live audio translation route.
+
+Improvements over the original:
+  1. Sentence buffering — accumulates transcription results across chunks
+     and only translates at natural sentence boundaries (punctuation or
+     500ms-equivalent silence detected by the client sending a flush=true param).
+     Word-by-word translation produces broken output; sentence-level is accurate.
+
+  2. DeepL-first translation — routes to DeepL for European languages (much
+     cheaper than Claude), falls back to Claude for anything else.
+
+  3. Confidence filtering — still skips no_speech and low-quality chunks
+     before they reach the translation API.
+
+Session state is stored in a lightweight in-process dict keyed by a
+session_id that the client generates (UUID). This is stateless across
+server restarts, which is acceptable for live translation sessions.
+"""
+
 import os
 import re
 import subprocess
 import tempfile
-from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException
+import threading
+from collections import defaultdict
+from typing import Optional
+
 import imageio_ffmpeg
+from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException
 
 from middleware.auth import get_current_user
 
 router = APIRouter()
 FFMPEG = imageio_ffmpeg.get_ffmpeg_exe()
+
+# ── Language tables ───────────────────────────────────────────────────────────
 
 LANGUAGE_NAMES = {
     "af": "Afrikaans", "ar": "Arabic", "bg": "Bulgarian", "bn": "Bengali",
@@ -26,6 +52,43 @@ LANGUAGE_NAMES = {
     "ur": "Urdu", "vi": "Vietnamese", "yo": "Yoruba", "zh": "Chinese",
 }
 
+# Sentence-ending punctuation — used to detect natural translation boundaries
+_SENTENCE_END = re.compile(r'[.!?।۔。！？]\s*$')
+
+# ── Per-session sentence buffer ───────────────────────────────────────────────
+# Maps session_id → {"buffer": str, "source_lang": str}
+_session_buffers: dict[str, dict] = defaultdict(lambda: {"buffer": "", "source_lang": ""})
+_buffer_lock = threading.Lock()
+
+
+def _get_buffer(session_id: str) -> dict:
+    with _buffer_lock:
+        return _session_buffers[session_id]
+
+
+def _update_buffer(session_id: str, text: str, source_lang: str) -> None:
+    with _buffer_lock:
+        buf = _session_buffers[session_id]
+        buf["buffer"] = (buf["buffer"] + " " + text).strip()
+        buf["source_lang"] = source_lang
+
+
+def _flush_buffer(session_id: str) -> tuple[str, str]:
+    """Return (buffered_text, source_lang) and clear the buffer."""
+    with _buffer_lock:
+        buf = _session_buffers[session_id]
+        text = buf.get("buffer", "")
+        lang = buf.get("source_lang", "")
+        buf["buffer"] = ""
+        return text, lang
+
+
+def _clear_session(session_id: str) -> None:
+    with _buffer_lock:
+        _session_buffers.pop(session_id, None)
+
+
+# ── Audio helpers ─────────────────────────────────────────────────────────────
 
 def _convert_to_mp3(input_path: str, output_path: str) -> None:
     cmd = [
@@ -36,14 +99,14 @@ def _convert_to_mp3(input_path: str, output_path: str) -> None:
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         import logging
-        logging.getLogger(__name__).warning("ffmpeg failed: %s", result.stderr[-800:] if result.stderr else "no stderr")
+        logging.getLogger(__name__).warning(
+            "ffmpeg failed: %s", result.stderr[-800:] if result.stderr else "no stderr"
+        )
         raise HTTPException(status_code=400, detail="Could not process audio — ensure the browser supports WebM/Opus.")
 
 
-def _transcribe_with_language(mp3_path: str, hint_language: str | None = None) -> dict:
-    """Returns {text, language, no_speech_prob}.
-    no_speech_prob is Whisper's own estimate that the clip contains no real speech (0–1).
-    """
+def _transcribe_with_language(mp3_path: str, hint_language: Optional[str] = None) -> dict:
+    """Returns {text, language, no_speech_prob}."""
     backend = os.environ.get("WHISPER_BACKEND", "local").lower()
     api_key = os.environ.get("GROQ_API_KEY", "")
 
@@ -56,7 +119,6 @@ def _transcribe_with_language(mp3_path: str, hint_language: str | None = None) -
         with open(mp3_path, "rb") as f:
             response = client.audio.transcriptions.create(file=f, **kwargs)
 
-        # Average no_speech_prob across all segments (Groq may or may not return this)
         no_speech_prob = 0.0
         segs = getattr(response, "segments", None) or []
         if segs:
@@ -91,7 +153,8 @@ def _transcribe_with_language(mp3_path: str, hint_language: str | None = None) -
         }
 
 
-# Whisper commonly hallucinates these exact strings on silence
+# ── Quality filtering ─────────────────────────────────────────────────────────
+
 _HALLUCINATION_PHRASES = {
     "thank you.", "thank you", "thanks for watching.", "thanks for watching",
     "you", "bye.", "bye", "goodbye.", "please subscribe.", "subtitles by",
@@ -100,39 +163,26 @@ _HALLUCINATION_PHRASES = {
 
 
 def _is_meaningful(text: str) -> bool:
-    """Return False for silence/noise artifacts.
-
-    Catches:
-    - Empty / punctuation-only output
-    - Whisper hallucination phrases
-    - Repeated-character garbage  (e.g. "wuqqqqqqqq")
-    - Mixed Unicode scripts       (e.g. Latin + CJK from encoding corruption)
-    """
+    """Return False for silence/noise artifacts."""
     stripped = text.strip()
     if not stripped:
         return False
-
-    # Known verbatim hallucinations
     if stripped.lower() in _HALLUCINATION_PHRASES:
         return False
 
-    # Must contain at least 4 real word characters
     letters_only = re.sub(r"[^\w]", "", stripped, flags=re.UNICODE)
     if len(letters_only) < 4:
         return False
 
-    # Must have at least one word of 2+ characters
     words = [w for w in re.split(r"\s+", stripped) if re.search(r"\w{2,}", w, re.UNICODE)]
     if not words:
         return False
 
-    # Repeated-character hallucination: any single char > 35 % of all letters
     lower_letters = letters_only.lower()
     max_freq = max(lower_letters.count(c) for c in set(lower_letters))
     if max_freq / len(lower_letters) > 0.35:
         return False
 
-    # Mixed-script hallucination: classify each alpha char by Unicode block
     scripts: set[str] = set()
     for ch in stripped:
         if not ch.isalpha():
@@ -152,34 +202,51 @@ def _is_meaningful(text: str) -> bool:
     return True
 
 
-def _translate_with_claude(text: str, source_lang_name: str, target_lang_name: str) -> str:
-    import anthropic
-    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-    msg = client.messages.create(
-        model="claude-haiku-4-5-20251001",
-        max_tokens=1024,
-        messages=[{
-            "role": "user",
-            "content": (
-                f"Translate the following text from {source_lang_name} to {target_lang_name}. "
-                f"Return only the translation, nothing else.\n\n{text}"
-            ),
-        }],
-    )
-    return msg.content[0].text.strip()
-
+# ── Endpoints ─────────────────────────────────────────────────────────────────
 
 @router.post("/translate/audio")
 async def translate_audio(
     audio: UploadFile = File(...),
     target_language: str = Form("en"),
-    source_language: str = Form(""),   # empty string = auto-detect
+    source_language: str = Form(""),        # empty = auto-detect
+    session_id: str = Form(""),             # client UUID for sentence buffering
+    flush: str = Form("false"),             # "true" = force translate buffered text now
     current_user=Depends(get_current_user),
 ):
+    """
+    Transcribe an audio chunk and translate it to the target language.
+
+    Sentence buffering:
+      - Each chunk's transcription is appended to a per-session buffer.
+      - Translation only fires when a sentence boundary is detected (ends with
+        . ! ? etc.) OR when the client sends flush=true (e.g. on pause/silence).
+      - This avoids the garbage-in-garbage-out problem of translating partial words.
+
+    Returns:
+      {
+        "source_language": "fr",
+        "source_text": "Bonjour tout le monde.",     ← full buffered sentence
+        "translated_text": "Hello everyone.",
+        "backend": "deepl",                           ← which engine was used
+        "buffering": false                            ← true when buffer not flushed yet
+      }
+    """
     if target_language not in LANGUAGE_NAMES:
         raise HTTPException(status_code=400, detail="Unsupported target language.")
-    hint = source_language.strip() if source_language and source_language in LANGUAGE_NAMES else None
 
+    hint = source_language.strip() if source_language and source_language in LANGUAGE_NAMES else None
+    force_flush = flush.strip().lower() == "true"
+    sid = session_id.strip() or "default"
+
+    empty_response = {
+        "source_language": hint or "en",
+        "source_text": "",
+        "translated_text": "",
+        "backend": "none",
+        "buffering": True,
+    }
+
+    # ── Step 1: transcribe this chunk ────────────────────────────────────────
     raw_bytes = await audio.read()
     if len(raw_bytes) < 500:
         raise HTTPException(status_code=400, detail="Audio chunk too small.")
@@ -195,29 +262,98 @@ async def translate_audio(
         _convert_to_mp3(raw_path, mp3_path)
 
         result = _transcribe_with_language(mp3_path, hint_language=hint)
-        source_text = result["text"]
-        source_language = result["language"]
 
-        # Whisper's own confidence that there was no real speech — discard if too high
-        if result.get("no_speech_prob", 0.0) > 0.6:
-            return {"source_language": source_language, "source_text": "", "translated_text": ""}
+    source_text = result["text"]
+    detected_lang = result["language"]
 
-        if not _is_meaningful(source_text):
-            return {"source_language": source_language, "source_text": "", "translated_text": ""}
+    # Discard silence / hallucinations
+    if result.get("no_speech_prob", 0.0) > 0.6:
+        if force_flush:
+            buffered, lang = _flush_buffer(sid)
+            if not buffered:
+                return empty_response
+            source_text, detected_lang = buffered, lang or detected_lang
+        else:
+            return {**empty_response, "source_language": detected_lang}
 
-        if source_language == target_language:
+    elif not _is_meaningful(source_text):
+        if force_flush:
+            buffered, lang = _flush_buffer(sid)
+            if not buffered:
+                return empty_response
+            source_text, detected_lang = buffered, lang or detected_lang
+        else:
+            return {**empty_response, "source_language": detected_lang}
+
+    else:
+        # Accumulate in buffer
+        _update_buffer(sid, source_text, detected_lang)
+
+        # Decide whether to translate now or wait
+        buf = _get_buffer(sid)
+        buffered_text = buf["buffer"]
+        has_sentence_end = bool(_SENTENCE_END.search(buffered_text))
+
+        if not force_flush and not has_sentence_end:
+            # Keep buffering — return buffering=True so UI shows partial text
             return {
-                "source_language": source_language,
-                "source_text": source_text,
-                "translated_text": source_text,
+                "source_language": detected_lang,
+                "source_text": buffered_text,
+                "translated_text": "",
+                "backend": "none",
+                "buffering": True,
             }
 
-        source_lang_name = LANGUAGE_NAMES.get(source_language, source_language.title())
-        target_lang_name = LANGUAGE_NAMES[target_language]
-        translated = _translate_with_claude(source_text, source_lang_name, target_lang_name)
+        # Flush the buffer for translation
+        source_text, detected_lang = _flush_buffer(sid)
+        if detected_lang:
+            hint = hint or detected_lang
 
+    # ── Step 2: same language? skip translation ───────────────────────────────
+    if not source_text.strip():
+        return empty_response
+
+    effective_source = hint or detected_lang
+    if effective_source == target_language:
         return {
-            "source_language": source_language,
+            "source_language": effective_source,
             "source_text": source_text,
-            "translated_text": translated,
+            "translated_text": source_text,
+            "backend": "passthrough",
+            "buffering": False,
         }
+
+    # ── Step 3: translate via DeepL → Claude fallback ────────────────────────
+    source_lang_name = LANGUAGE_NAMES.get(effective_source, effective_source.upper())
+    target_lang_name = LANGUAGE_NAMES[target_language]
+
+    from services.translation import translate_text
+    translated, backend_used = translate_text(
+        source_text,
+        source_lang=effective_source,
+        target_lang=target_language,
+        source_lang_name=source_lang_name,
+        target_lang_name=target_lang_name,
+    )
+
+    return {
+        "source_language": effective_source,
+        "source_text": source_text,
+        "translated_text": translated,
+        "backend": backend_used,
+        "buffering": False,
+    }
+
+
+@router.post("/translate/flush")
+async def flush_session(
+    session_id: str = Form(...),
+    current_user=Depends(get_current_user),
+):
+    """
+    Clear the sentence buffer for a session (call when the user stops recording).
+    Returns any remaining buffered text so the client can display it.
+    """
+    buffered, lang = _flush_buffer(session_id)
+    _clear_session(session_id)
+    return {"flushed_text": buffered, "source_language": lang}

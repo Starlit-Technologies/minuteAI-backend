@@ -14,6 +14,11 @@ from services.transcription import transcribe
 UPLOAD_DIR = Path(__file__).parent.parent / "storage" / "uploads"
 OUTPUT_DIR = Path(__file__).parent.parent / "storage" / "outputs"
 
+# ── Backend selection ─────────────────────────────────────────────────────────
+# TRANSCRIPTION_BACKEND=assemblyai  → diarization, speaker labels, higher accuracy
+# TRANSCRIPTION_BACKEND=groq        → fast, no diarization (default)
+TRANSCRIPTION_BACKEND = os.environ.get("TRANSCRIPTION_BACKEND", "groq").lower()
+
 
 def create_processing_job_from_media(
     *,
@@ -40,6 +45,17 @@ def create_processing_job_from_media(
         workspace_id=workspace_id,
         audio_path=final_media_path,
     ))
+
+    # Also upload to R2 if configured
+    try:
+        from services.storage_r2 import _is_configured, upload_file, r2_key_for_audio
+        if _is_configured():
+            r2_key = r2_key_for_audio(job_id, suffix)
+            upload_file(final_media_path, r2_key)
+            store.update(job_id, r2_audio_key=r2_key)
+    except Exception:
+        pass
+
     start_pipeline(job_id)
     return job_id
 
@@ -49,35 +65,141 @@ def start_pipeline(job_id: str):
     worker.start()
 
 
-def run_pipeline(job_id: str):
-    job = store.get(job_id)
+def _resolve_audio(job: Job) -> tuple[str, bool]:
+    """
+    Return (local_audio_path, is_temp).
+
+    If the file exists locally, return it directly (is_temp=False).
+    If an R2 key is stored and the local file is gone, download from R2
+    to a temp file (is_temp=True — caller must delete after use).
+    """
+    local = job.audio_path
+    if local and os.path.exists(local):
+        return local, False
+
+    r2_key = job.r2_audio_key
+    if r2_key:
+        try:
+            from services.storage_r2 import download_to_temp
+            suffix = Path(r2_key).suffix or ".mp3"
+            tmp_path = download_to_temp(r2_key, suffix=suffix)
+            return tmp_path, True
+        except Exception as exc:
+            raise RuntimeError(f"Audio file not found locally and R2 download failed: {exc}")
+
+    raise RuntimeError("Audio file not found — please re-upload.")
+
+
+def _transcribe_groq(job: Job, on_partial) -> str:
+    """Transcribe using Groq Whisper (fast, no diarization)."""
+    audio_path, is_temp = _resolve_audio(job)
     try:
-        transcript = job.transcript
-        if not transcript:
-            audio_path = job.audio_path
-            if not audio_path or not os.path.exists(audio_path):
-                raise RuntimeError("Audio file not found — please re-upload.")
-
-            store.update(job_id, status="transcribing", message="Transcribing audio with Whisper…")
-
-            def on_partial(text: str):
-                store.update(job_id, transcript=text)
-
-            lang = (job.job_config or {}).get("audio_language") or None
-            transcript = transcribe(audio_path, on_partial=on_partial, language=lang or None)
-            if not transcript or not transcript.strip():
-                raise RuntimeError("Transcription returned no text. The audio may be silent or unreadable.")
-            store.update(job_id, transcript=transcript)
-
+        lang = (job.job_config or {}).get("audio_language") or None
+        return transcribe(audio_path, on_partial=on_partial, language=lang or None), is_temp, audio_path
+    except Exception:
+        if is_temp:
             try:
                 os.unlink(audio_path)
             except OSError:
                 pass
-            store.update(job_id, audio_path=None)
+        raise
+
+
+def _transcribe_assemblyai(job: Job, on_partial) -> tuple[str, bool, str]:
+    """
+    Transcribe using AssemblyAI with speaker diarization.
+
+    Prefers to pass an R2 presigned URL directly to AssemblyAI
+    (avoids double-downloading large files). Falls back to local file.
+
+    Returns (diarized_transcript_text, is_temp, audio_path_or_empty).
+    """
+    from services.transcription_assemblyai import transcribe_with_diarization, format_diarized_transcript
+
+    lang = (job.job_config or {}).get("audio_language") or None
+    audio_source = None
+    is_temp = False
+    local_path = ""
+
+    # Prefer R2 presigned URL — AssemblyAI can download it directly
+    if job.r2_audio_key:
+        try:
+            from services.storage_r2 import get_presigned_url, _is_configured
+            if _is_configured():
+                # Give AssemblyAI 4 hours — large files can take time
+                audio_source = get_presigned_url(job.r2_audio_key, expires_in=14400)
+        except Exception:
+            pass
+
+    # Fall back to local/downloaded file
+    if not audio_source:
+        local_path, is_temp = _resolve_audio(job)
+        audio_source = local_path
+
+    result = transcribe_with_diarization(audio_source, language=lang, on_partial=on_partial)
+
+    # Store audio duration in job config for Claude context
+    if result.audio_duration_s:
+        config = dict(job.job_config or {})
+        mins = int(result.audio_duration_s // 60)
+        secs = int(result.audio_duration_s % 60)
+        config["_audio_duration"] = f"{mins}m {secs}s"
+        store.update(job.id, job_config=config)
+
+    diarized_text = format_diarized_transcript(result)
+    return diarized_text, is_temp, local_path
+
+
+def run_pipeline(job_id: str):
+    job = store.get(job_id)
+    _tmp_audio: Optional[str] = None
+    try:
+        transcript = job.transcript
+        if not transcript:
+            backend = TRANSCRIPTION_BACKEND
+            backend_label = "AssemblyAI (with speaker diarization)" if backend == "assemblyai" else "Whisper"
+            store.update(job_id, status="transcribing",
+                         message=f"Transcribing audio with {backend_label}…")
+
+            def on_partial(text: str):
+                store.update(job_id, transcript=text)
+
+            if backend == "assemblyai":
+                transcript, is_temp, local_path = _transcribe_assemblyai(job, on_partial)
+                if is_temp and local_path:
+                    _tmp_audio = local_path
+            else:
+                audio_path, is_temp = _resolve_audio(job)
+                if is_temp:
+                    _tmp_audio = audio_path
+                lang = (job.job_config or {}).get("audio_language") or None
+                transcript = transcribe(audio_path, on_partial=on_partial, language=lang or None)
+
+            if not transcript or not transcript.strip():
+                raise RuntimeError("Transcription returned no text. The audio may be silent or unreadable.")
+            store.update(job_id, transcript=transcript)
+
+            # Clean up temp download (R2 is the permanent record — do NOT delete it)
+            if is_temp and _tmp_audio:
+                try:
+                    os.unlink(_tmp_audio)
+                except OSError:
+                    pass
+                _tmp_audio = None
+
+            # Remove local copy only if R2 has a permanent copy
+            if job.r2_audio_key and job.audio_path and os.path.exists(job.audio_path or ""):
+                try:
+                    os.unlink(job.audio_path)
+                except OSError:
+                    pass
+                store.update(job_id, audio_path=None)
 
         minutes = job.minutes
         if not minutes:
             store.update(job_id, status="formatting", message="Formatting minutes with Claude…")
+            # Re-fetch job in case config was updated with audio duration
+            job = store.get(job_id)
             minutes = format_minutes(transcript, config=job.job_config)
             store.update(job_id, minutes=minutes)
 
@@ -89,6 +211,17 @@ def run_pipeline(job_id: str):
             pdf_path = str(OUTPUT_DIR / f"{job_id}.pdf")
             generate_docx(minutes, docx_path)
             generate_pdf(minutes, pdf_path)
+
+            # Upload documents to R2 for persistent access
+            try:
+                from services.storage_r2 import _is_configured, upload_file, r2_key_for_output
+                if _is_configured():
+                    upload_file(docx_path, r2_key_for_output(job_id, "docx"),
+                                content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+                    upload_file(pdf_path, r2_key_for_output(job_id, "pdf"),
+                                content_type="application/pdf")
+            except Exception:
+                pass  # local copies still work
 
         store.update(job_id, status="done", docx_path=docx_path, pdf_path=pdf_path, message=None)
 
@@ -118,3 +251,12 @@ def run_pipeline(job_id: str):
                 send_error_email(job.email, job_id, str(exc))
             except Exception:
                 pass
+    finally:
+        # Safety: clean up any dangling temp download
+        if _tmp_audio:
+            try:
+                os.unlink(_tmp_audio)
+            except OSError:
+                pass
+
+

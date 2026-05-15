@@ -8,9 +8,10 @@ services:
     healthCheckPath: /health
     autoDeployTrigger: commit
 
-    # Persistent disk — keeps uploads, outputs, and the Google Meet bot profile
-    # across deploys and restarts.  All storage paths in the backend code resolve
-    # to <project_root>/storage/, which is exactly where this disk is mounted.
+    # Persistent disk — now only needed for the Google Meet bot Chrome profile
+    # and any short-lived temp files during processing.
+    # Audio recordings and documents are stored permanently in Cloudflare R2.
+    # Can be reduced to 1 GB once R2 is active.
     disk:
       name: minuteai-storage
       mountPath: /opt/render/project/src/storage
@@ -67,3 +68,40 @@ services:
         sync: false
       - key: BACKEND_URL
         value: https://minuteai-backend.onrender.com
+
+      # ── Cloudflare R2 (persistent audio & document storage) ──────────────────
+      # Set these in the Render dashboard after creating your R2 bucket.
+      # Get your API token from: Cloudflare Dashboard → R2 → Manage R2 API Tokens
+      - key: R2_ACCOUNT_ID
+        sync: false
+      - key: R2_ACCESS_KEY_ID
+        sync: false
+      - key: R2_SECRET_ACCESS_KEY
+        sync: false
+      - key: R2_BUCKET_NAME
+        sync: false
+      # Optional — leave blank to use presigned URLs (recommended)
+      - key: R2_PUBLIC_URL
+        sync: false
+
+      # ── Transcription backend ───────────────────────────────────────────────
+      # groq = fast Whisper (default). assemblyai = diarization + speaker labels.
+      - key: TRANSCRIPTION_BACKEND
+        value: groq
+      - key: ASSEMBLYAI_API_KEY
+        sync: false
+      # Optional: set to expected number of speakers (e.g. 2) for better accuracy
+      - key: ASSEMBLYAI_SPEAKERS_EXPECTED
+        sync: false
+
+      # ── Translation backend ────────────────────────────────────────────
+      # auto = DeepL (30 langs) → Claude fallback. deepl = DeepL only. claude = Claude only.
+      - key: TRANSLATION_BACKEND
+        value: auto
+      - key: DEEPL_API_KEY
+        sync: false
+
+      # ── Deepgram (real-time live transcription) ────────────────────────
+      # Required for /ws/live-translate WebSocket endpoint
+      - key: DEEPGRAM_API_KEY
+        sync: false

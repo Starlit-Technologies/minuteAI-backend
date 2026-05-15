@@ -13,6 +13,7 @@ from middleware.auth import get_db, get_optional_user
 from models.job import Job, JobRecord, store
 from models.user import User
 from services.processing_pipeline import start_pipeline
+from services.storage_r2 import upload_file as r2_upload, r2_key_for_audio, _is_configured as r2_configured
 from services.users import _plan_limits
 
 router = APIRouter()
@@ -134,6 +135,19 @@ async def complete_upload(
 
     shutil.rmtree(str(chunk_dir), ignore_errors=True)
     store.update(job_id, audio_path=audio_path)
+
+    # ── Upload to Cloudflare R2 (if configured) ───────────────────────────
+    r2_key = None
+    if r2_configured():
+        try:
+            r2_key = r2_key_for_audio(job_id, suffix)
+            r2_upload(audio_path, r2_key)
+            store.update(job_id, r2_audio_key=r2_key)
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).warning("R2 upload failed (falling back to local): %s", exc)
+            r2_key = None
+
     start_pipeline(job_id)
     return {"jobId": job_id}
 

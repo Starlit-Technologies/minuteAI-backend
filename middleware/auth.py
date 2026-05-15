@@ -81,3 +81,18 @@ def get_optional_user(
         return db.query(User).filter(User.id == payload["sub"]).first()
     except JWTError:
         return None
+
+
+def verify_token_string(token: str) -> dict:
+    """
+    Validate a raw JWT string (no FastAPI dependency injection).
+    Used by WebSocket endpoints where the token is passed as a query param.
+    Returns the decoded payload or raises ValueError.
+    """
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    except JWTError as exc:
+        raise ValueError(f"Invalid or expired token: {exc}")
+    if payload.get("type") != "access":
+        raise ValueError("Not an access token.")
+    return payload
