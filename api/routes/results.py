@@ -13,4 +13,7 @@ def get_results(job_id: str):
         raise HTTPException(status_code=500, detail=job.message or "Processing failed.")
     if job.status != "done":
         raise HTTPException(status_code=202, detail="Processing not complete yet.")
-    return job.minutes
+    result = dict(job.minutes or {})
+    if job.transcript:
+        result["transcript"] = job.transcript
+    return result

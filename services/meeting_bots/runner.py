@@ -31,6 +31,26 @@ except Exception:
 DEBUG_DIR   = Path(__file__).parent.parent.parent / "storage" / "meeting_bot_debug"
 CAPTURE_DIR = Path(__file__).parent.parent.parent / "storage" / "meeting_bot_captures"
 
+# ── Live translate audio registry ─────────────────────────────────────────────
+# Maps bot session_id → asyncio.Queue[bytes | None] when a client is listening.
+# None is the sentinel that ends the stream.
+_live_audio_queues: dict[str, asyncio.Queue] = {}
+
+
+def register_bot_audio_listener(session_id: str) -> asyncio.Queue:
+    q: asyncio.Queue = asyncio.Queue(maxsize=500)
+    _live_audio_queues[session_id] = q
+    return q
+
+
+def unregister_bot_audio_listener(session_id: str) -> None:
+    q = _live_audio_queues.pop(session_id, None)
+    if q:
+        try:
+            q.put_nowait(None)  # wake up any waiting consumer
+        except Exception:
+            pass
+
 GOOGLE_CLIENT_ID     = os.environ.get("GOOGLE_CLIENT_ID", "")
 GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "")
 
@@ -126,6 +146,48 @@ _AUDIO_CAPTURE_SCRIPT = r"""
         } catch(_) {}
     }
 
+    // ── PCM16 capture for real-time live translate ──────────────────────────
+    // Separate AudioContext at 16kHz so the browser resamples automatically.
+    const pcmCtx    = new _AC({ sampleRate: 16000 });
+    const pcmChunks = [];
+    let   pcmActive = false;
+
+    function _f32ToPcm16b64(f32) {
+        const i16 = new Int16Array(f32.length);
+        for (let i = 0; i < f32.length; i++) {
+            const s = Math.max(-1, Math.min(1, f32[i]));
+            i16[i] = s < 0 ? s * 32768 : s * 32767;
+        }
+        const bytes = new Uint8Array(i16.buffer);
+        let bin = '';
+        for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+        return btoa(bin);
+    }
+
+    window.__maPcmStart = function() {
+        pcmActive = true;
+        pcmCtx.resume().catch(function(){});
+    };
+    window.__maPcmStop  = function() { pcmActive = false; };
+    window.__maPcmDrain = function() { return pcmChunks.splice(0); };
+
+    const pcmConnected = new WeakSet();
+    function connectTrackPcm(track) {
+        if (track.kind !== 'audio' || pcmConnected.has(track)) return;
+        pcmConnected.add(track);
+        try {
+            const src  = pcmCtx.createMediaStreamSource(new MediaStream([track]));
+            const proc = pcmCtx.createScriptProcessor(4096, 1, 1);
+            proc.onaudioprocess = function(e) {
+                if (!pcmActive) return;
+                pcmChunks.push(_f32ToPcm16b64(e.inputBuffer.getChannelData(0)));
+            };
+            src.connect(proc);
+            proc.connect(pcmCtx.destination);
+        } catch(_) {}
+    }
+    // ─────────────────────────────────────────────────────────────────────────
+
     const connected = new WeakSet();
     function connectTrack(track) {
         if (track.kind !== 'audio' || connected.has(track)) return;
@@ -135,6 +197,7 @@ _AUDIO_CAPTURE_SCRIPT = r"""
             src.connect(dest);
             ensureRecorder();
         } catch(_) {}
+        connectTrackPcm(track);
     }
 
     const _PC = window.RTCPeerConnection;
@@ -223,6 +286,38 @@ async def _drain_audio_chunks(page, chunks_store: list, session_id: str):
         except Exception as exc:
             _log(session_id, f"Audio drain error: {exc}")
             break
+
+
+async def _drain_pcm_for_live_translate(page, session_id: str):
+    """
+    Fast drain loop (250ms) for PCM audio chunks.  Only activates the browser-
+    side ScriptProcessor when a live-translate client is registered, so there's
+    no overhead when nobody is listening.
+    """
+    pcm_was_active = False
+    while True:
+        await asyncio.sleep(0.25)
+        q = _live_audio_queues.get(session_id)
+        try:
+            if q is None:
+                if pcm_was_active:
+                    await page.evaluate("window.__maPcmStop && window.__maPcmStop()")
+                    pcm_was_active = False
+                continue
+
+            if not pcm_was_active:
+                await page.evaluate("window.__maPcmStart && window.__maPcmStart()")
+                pcm_was_active = True
+
+            chunks = await page.evaluate("window.__maPcmDrain ? window.__maPcmDrain() : []")
+            for b64 in (chunks or []):
+                try:
+                    pcm = base64.b64decode(b64)
+                    q.put_nowait(pcm)
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
 
 def _save_audio_chunks(chunks: list[str], path: str) -> bool:
@@ -781,6 +876,7 @@ async def _run_playwright_session(ctx: BotRunContext):
 
     audio_chunks: list[str] = []
     drain_task: Optional[asyncio.Task] = None
+    pcm_drain_task: Optional[asyncio.Task] = None
 
     CAPTURE_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -849,7 +945,8 @@ async def _run_playwright_session(ctx: BotRunContext):
 
                 _log(ctx.session_id, "Admitted — audio capture active")
 
-                drain_task = asyncio.create_task(_drain_audio_chunks(page, audio_chunks, ctx.session_id))
+                drain_task     = asyncio.create_task(_drain_audio_chunks(page, audio_chunks, ctx.session_id))
+                pcm_drain_task = asyncio.create_task(_drain_pcm_for_live_translate(page, ctx.session_id))
                 await _wait_for_recording_completion(page, ctx.session_id, ctx.platform)
 
             except Exception as exc:
@@ -863,6 +960,11 @@ async def _run_playwright_session(ctx: BotRunContext):
                     drain_task.cancel()
                     with suppress(Exception):
                         await drain_task
+                if pcm_drain_task and not pcm_drain_task.done():
+                    pcm_drain_task.cancel()
+                    with suppress(Exception):
+                        await pcm_drain_task
+                unregister_bot_audio_listener(ctx.session_id)
 
                 with suppress(Exception):
                     await page.evaluate("if (window.__maStop) window.__maStop()")

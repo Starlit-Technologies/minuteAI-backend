@@ -48,20 +48,20 @@ def is_configured() -> bool:
     return bool(os.environ.get("DEEPGRAM_API_KEY", "").strip())
 
 
-def _build_url(language: Optional[str]) -> str:
+def _build_url(language: Optional[str], diarize: bool = False) -> tuple[str, str]:
     """Build the Deepgram streaming WebSocket URL with query params."""
     api_key = os.environ["DEEPGRAM_API_KEY"]
     lang = get_deepgram_lang(language or "en") if language else "en"
 
     params = [
-        f"model=nova-2",            # Best accuracy model
+        "model=nova-2",
         f"language={lang}",
-        "smart_format=true",        # Adds punctuation + capitalization automatically
-        "diarize=false",            # We don't need diarization for live (AssemblyAI handles post-meeting)
-        "interim_results=true",     # Stream partial words while speaking
-        "endpointing=500",          # Detect sentence end after 500ms silence
-        "utterance_end_ms=1000",    # Fire utterance_end event after 1s silence
-        "encoding=linear16",        # PCM 16-bit audio from Expo Audio
+        "smart_format=true",
+        f"diarize={'true' if diarize else 'false'}",
+        "interim_results=true",
+        "endpointing=500",
+        "utterance_end_ms=1000",
+        "encoding=linear16",
         "sample_rate=16000",
         "channels=1",
     ]
@@ -71,7 +71,7 @@ def _build_url(language: Optional[str]) -> str:
 
 class DeepgramWord:
     """A single transcribed word with timing and confidence."""
-    __slots__ = ("word", "start", "end", "confidence", "punctuated_word")
+    __slots__ = ("word", "start", "end", "confidence", "punctuated_word", "speaker")
 
     def __init__(self, raw: dict):
         self.word = raw.get("word", "")
@@ -79,6 +79,7 @@ class DeepgramWord:
         self.start = raw.get("start", 0.0)
         self.end = raw.get("end", 0.0)
         self.confidence = raw.get("confidence", 1.0)
+        self.speaker = raw.get("speaker")  # int or None when diarize=false
 
     @property
     def is_reliable(self) -> bool:
@@ -87,7 +88,7 @@ class DeepgramWord:
 
 class DeepgramTranscript:
     """Parsed result from a Deepgram response message."""
-    __slots__ = ("text", "words", "is_final", "speech_final", "confidence")
+    __slots__ = ("text", "words", "is_final", "speech_final", "confidence", "speaker")
 
     def __init__(self, text: str, words: list[DeepgramWord], is_final: bool, speech_final: bool):
         self.text = text
@@ -98,6 +99,15 @@ class DeepgramTranscript:
             sum(w.confidence for w in words) / len(words)
             if words else 0.0
         )
+        # Dominant speaker = most frequent speaker label across words
+        if words:
+            counts: dict = {}
+            for w in words:
+                if w.speaker is not None:
+                    counts[w.speaker] = counts.get(w.speaker, 0) + 1
+            self.speaker: Optional[int] = max(counts, key=counts.get) if counts else None
+        else:
+            self.speaker = None
 
     @property
     def reliable_text(self) -> str:

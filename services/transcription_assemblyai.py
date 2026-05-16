@@ -58,10 +58,12 @@ def _get_client():
 
 
 def _build_config(aai, language: Optional[str]) -> object:
-    """Build AssemblyAI TranscriptionConfig with diarization enabled."""
+    """Build AssemblyAI TranscriptionConfig with diarization enabled.
+    speech_models is plural and a list — tries universal-3-pro first, falls back to universal-2."""
     speakers_expected = os.environ.get("ASSEMBLYAI_SPEAKERS_EXPECTED", "")
     kwargs = dict(
         speaker_labels=True,
+        speech_models=["universal-3-pro", "universal-2"],
         # Language detection: let AssemblyAI auto-detect unless hinted
         language_code=language or None,
         language_detection=not bool(language),
@@ -96,23 +98,27 @@ def transcribe_with_diarization(
     # Submit — SDK handles both local files and URLs transparently
     transcript = transcriber.submit(audio_source)
 
-    # Poll until done, calling on_partial every ~5 s so the UI stays alive
-    poll_interval = 5
+    # Poll manually so we can fire on_partial callbacks while waiting
+    import requests as _requests
+    poll_headers = {"authorization": os.environ.get("ASSEMBLYAI_API_KEY", "")}
+    poll_url = f"https://api.assemblyai.com/v2/transcript/{transcript.id}"
     last_partial_text = ""
     while True:
-        transcript = transcript.wait_for_completion(timeout=poll_interval)
-
-        if transcript.status == aai.TranscriptStatus.completed:
+        time.sleep(5)
+        res = _requests.get(poll_url, headers=poll_headers, timeout=30)
+        data = res.json()
+        status = data.get("status")
+        if status == "completed":
             break
-        if transcript.status == aai.TranscriptStatus.error:
-            raise RuntimeError(f"AssemblyAI transcription failed: {transcript.error}")
-
-        # Still processing — fire partial with whatever text we have so far
-        partial_text = transcript.text or last_partial_text
+        if status == "error":
+            raise RuntimeError(f"AssemblyAI transcription failed: {data.get('error')}")
+        partial_text = data.get("text") or last_partial_text
         if on_partial and partial_text and partial_text != last_partial_text:
             on_partial(partial_text)
             last_partial_text = partial_text
 
+    # Fetch the final result via the SDK object for typed access
+    transcript = transcript.wait_for_completion()
     full_text = transcript.text or ""
 
     # Build structured utterances from diarization results

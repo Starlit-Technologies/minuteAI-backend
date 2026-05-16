@@ -87,7 +87,7 @@ services:
       # ── Transcription backend ───────────────────────────────────────────────
       # groq = fast Whisper (default). assemblyai = diarization + speaker labels.
       - key: TRANSCRIPTION_BACKEND
-        value: groq
+        value: assemblyai
       - key: ASSEMBLYAI_API_KEY
         sync: false
       # Optional: set to expected number of speakers (e.g. 2) for better accuracy

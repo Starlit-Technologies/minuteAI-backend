@@ -11,37 +11,73 @@ SYSTEM_PROMPT = (Path(__file__).parent.parent / "prompts" / "minutes_formatter.t
 # Tool schema — Claude fills this in, giving us validated structured output
 MINUTES_TOOL = {
     "name": "produce_minutes",
-    "description": "Output the structured meeting minutes extracted from the transcript.",
+    "description": "Output comprehensive, structured meeting minutes extracted from the transcript.",
     "input_schema": {
         "type": "object",
-        "required": ["title", "metadata", "sections", "action_items", "plain_text"],
+        "required": [
+            "title", "overview", "metadata",
+            "key_decisions", "action_items", "sections",
+            "speaker_summaries", "questions_raised", "next_steps", "plain_text",
+        ],
         "properties": {
             "title": {
                 "type": "string",
-                "description": "A concise title for the meeting, e.g. 'Q2 Planning Meeting'"
+                "description": "Concise meeting title, e.g. 'Q2 Planning Meeting'"
+            },
+            "overview": {
+                "type": "string",
+                "description": (
+                    "3–5 sentence executive summary: purpose of the meeting, key outcomes, "
+                    "main decisions, and immediate next steps. Written for someone who missed the meeting."
+                )
             },
             "metadata": {
                 "type": "object",
                 "required": ["date", "duration", "participants"],
                 "properties": {
-                    "date": {"type": "string", "description": "Date of the meeting (infer from transcript or use 'Unknown')"},
+                    "date": {"type": "string", "description": "Date (infer from transcript or 'Unknown')"},
                     "duration": {"type": "string", "description": "Approximate duration, e.g. '45 minutes'"},
                     "participants": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "Names or roles of all identified speakers"
+                        "description": "All identified speakers or known attendees"
+                    }
+                }
+            },
+            "key_decisions": {
+                "type": "array",
+                "description": "Every concrete decision made, even informal ones",
+                "items": {
+                    "type": "object",
+                    "required": ["decision", "context"],
+                    "properties": {
+                        "decision": {"type": "string", "description": "The decision made"},
+                        "made_by": {"type": "string", "description": "Speaker who made or proposed it"},
+                        "context": {"type": "string", "description": "Reasoning or context given in the meeting"}
                     }
                 }
             },
             "sections": {
                 "type": "array",
-                "description": "Agenda sections / topics discussed",
+                "description": "Logical agenda sections / topics discussed",
                 "items": {
                     "type": "object",
-                    "required": ["title", "content"],
+                    "required": ["title", "summary", "key_points"],
                     "properties": {
                         "title": {"type": "string"},
-                        "content": {"type": "string", "description": "2-4 sentence prose summary of discussion"}
+                        "summary": {
+                            "type": "string",
+                            "description": "3–5 sentence dense prose summary of the discussion"
+                        },
+                        "key_points": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": (
+                                "5–12 specific bullet points capturing what was said, proposed, "
+                                "agreed, or questioned. Include speaker attribution in brackets, "
+                                "e.g. 'Confirmed the deadline is Friday (Speaker A)'"
+                            )
+                        }
                     }
                 }
             },
@@ -49,17 +85,64 @@ MINUTES_TOOL = {
                 "type": "array",
                 "items": {
                     "type": "object",
-                    "required": ["task", "owner", "deadline"],
+                    "required": ["task", "owner", "deadline", "priority"],
                     "properties": {
                         "task": {"type": "string"},
                         "owner": {"type": "string"},
-                        "deadline": {"type": "string"}
+                        "deadline": {"type": "string"},
+                        "priority": {
+                            "type": "string",
+                            "enum": ["high", "medium", "low"],
+                            "description": "Priority inferred from urgency or importance signalled in conversation"
+                        }
                     }
                 }
             },
+            "speaker_summaries": {
+                "type": "array",
+                "description": "Summary of each speaker's role and contributions",
+                "items": {
+                    "type": "object",
+                    "required": ["speaker", "key_contributions"],
+                    "properties": {
+                        "speaker": {"type": "string"},
+                        "role": {"type": "string", "description": "Inferred role or title based on what they discussed"},
+                        "key_contributions": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "3–5 bullets: what they reported, proposed, questioned, or committed to"
+                        }
+                    }
+                }
+            },
+            "questions_raised": {
+                "type": "array",
+                "description": "Important questions asked during the meeting",
+                "items": {
+                    "type": "object",
+                    "required": ["question", "status"],
+                    "properties": {
+                        "question": {"type": "string"},
+                        "asked_by": {"type": "string"},
+                        "answer_summary": {
+                            "type": "string",
+                            "description": "How it was answered, or 'Not answered in this meeting'"
+                        },
+                        "status": {
+                            "type": "string",
+                            "enum": ["answered", "unresolved", "deferred"]
+                        }
+                    }
+                }
+            },
+            "next_steps": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "3–6 high-level follow-up items beyond individual action items"
+            },
             "plain_text": {
                 "type": "string",
-                "description": "The full minutes as clean plain text, suitable for pasting into an email"
+                "description": "Complete minutes as clean plain text ready to paste into email or Confluence"
             }
         }
     }
@@ -184,29 +267,40 @@ def _call_claude(transcript: str, config: dict | None = None) -> dict:
             if isinstance(data, str):
                 data = json.loads(data)
 
-            # Claude occasionally returns nested objects as JSON strings — parse them
+            def _parse_list(key):
+                val = data.get(key, [])
+                return [json.loads(v) if isinstance(v, str) else v for v in val]
+
             metadata = data.get("metadata", {})
             if isinstance(metadata, str):
                 metadata = json.loads(metadata)
 
-            sections = data.get("sections", [])
-            sections = [json.loads(s) if isinstance(s, str) else s for s in sections]
-
-            action_items = data.get("action_items", [])
-            action_items = [json.loads(a) if isinstance(a, str) else a for a in action_items]
+            sections      = _parse_list("sections")
+            action_items  = _parse_list("action_items")
+            key_decisions = _parse_list("key_decisions")
+            spk_summaries = _parse_list("speaker_summaries")
+            questions     = _parse_list("questions_raised")
+            next_steps    = data.get("next_steps", [])
+            if isinstance(next_steps, str):
+                next_steps = [next_steps]
 
             return {
                 "title": data.get("title", "Meeting"),
+                "overview": data.get("overview", ""),
                 "metadata": {
-                    "date": metadata.get("date", "Unknown"),
-                    "duration": metadata.get("duration", "Unknown"),
+                    "date":         metadata.get("date", "Unknown"),
+                    "duration":     metadata.get("duration", "Unknown"),
                     "participants": metadata.get("participants", []),
                 },
-                "sections": sections,
-                "actionItems": action_items,
-                "plainText": data.get("plain_text", ""),
-                "template": (config or {}).get("template", "standard"),
-                "outputLanguage": (config or {}).get("output_language", "en") or "en",
+                "keyDecisions":    key_decisions,
+                "sections":        sections,
+                "actionItems":     action_items,
+                "speakerSummaries": spk_summaries,
+                "questionsRaised": questions,
+                "nextSteps":       next_steps,
+                "plainText":       data.get("plain_text", ""),
+                "template":        (config or {}).get("template", "standard"),
+                "outputLanguage":  (config or {}).get("output_language", "en") or "en",
             }
 
     raise RuntimeError("Claude did not return a produce_minutes tool call")
