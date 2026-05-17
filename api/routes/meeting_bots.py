@@ -107,6 +107,7 @@ def create_meeting_bot_session(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
         ) from exc
+
     bot_account = None
     if payload.workspace_id:
         _ensure_workspace_access(payload.workspace_id, current_user, db)
