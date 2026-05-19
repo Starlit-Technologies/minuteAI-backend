@@ -18,9 +18,11 @@ _setup_proc: Optional[subprocess.Popen] = None
 
 def _defaults() -> dict:
     return {
-        "email":       os.environ.get("BOT_EMAIL", ""),
-        "bot_name":    os.environ.get("MEETING_BOT_RECORDER_NAME", "MinuteAI Recorder"),
-        "profile_dir": os.environ.get("MEETING_BOT_PROFILE_DIR", ""),
+        "email":             os.environ.get("BOT_EMAIL", ""),
+        "bot_name":          os.environ.get("MEETING_BOT_RECORDER_NAME", "MinuteAI Recorder"),
+        "profile_dir":       os.environ.get("MEETING_BOT_PROFILE_DIR", ""),
+        "bot_refresh_token": os.environ.get("BOT_REFRESH_TOKEN", ""),
+        "bot_oauth_email":   "",
     }
 
 
@@ -125,3 +127,59 @@ def cancel_setup() -> None:
 
 def setup_running() -> bool:
     return bool(_setup_proc and _setup_proc.poll() is None)
+
+
+# ── Session cookie storage ────────────────────────────────────────────────────
+# Cookies are exported from a locally-bootstrapped Chrome profile and stored
+# here so the bot can inject them into a fresh headless context on any server.
+
+_COOKIES_PATH = _CONFIG_PATH.parent / "bot_session_cookies.json"
+
+
+def save_session_cookies(cookies: list[dict]) -> None:
+    import json as _json
+    _COOKIES_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _COOKIES_PATH.write_text(_json.dumps(cookies))
+
+
+def load_session_cookies() -> list[dict] | None:
+    import json as _json
+    try:
+        data = _json.loads(_COOKIES_PATH.read_text())
+        return data if isinstance(data, list) and data else None
+    except Exception:
+        return None
+
+
+def clear_session_cookies() -> None:
+    try:
+        _COOKIES_PATH.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+def session_cookies_info() -> dict:
+    """Return metadata about stored cookies (for admin UI) without the raw values."""
+    import json as _json
+    try:
+        cookies = _json.loads(_COOKIES_PATH.read_text())
+        if not isinstance(cookies, list) or not cookies:
+            return {"stored": False}
+        # Find the latest expiry across session cookies
+        session_names = {"SID", "HSID", "SSID", "APISID", "SAPISID",
+                         "__Secure-1PSID", "__Secure-3PSID"}
+        session_cookies = [c for c in cookies if c.get("name") in session_names]
+        expires = [c["expires"] for c in session_cookies if c.get("expires", -1) > 0]
+        email = None
+        # Try to read the signed-in email from an OAuth cookie if present
+        for c in cookies:
+            if c.get("name") in {"COMPASS"} and "email" in str(c.get("value", "")):
+                pass
+        return {
+            "stored": True,
+            "count": len(cookies),
+            "expires_at": max(expires) if expires else None,
+            "imported_at": _COOKIES_PATH.stat().st_mtime if _COOKIES_PATH.exists() else None,
+        }
+    except Exception:
+        return {"stored": False}

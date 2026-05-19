@@ -1,6 +1,10 @@
+import os
+import time
+import urllib.parse
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
@@ -9,7 +13,18 @@ from middleware.auth import get_admin_user, get_db
 from models.bot_config import (
     cancel_setup, complete_setup, default_profile_dir,
     load_bot_config, profile_status, save_bot_config, setup_running, start_setup,
+    save_session_cookies, load_session_cookies, clear_session_cookies, session_cookies_info,
 )
+
+GOOGLE_CLIENT_ID     = os.environ.get("GOOGLE_CLIENT_ID", "")
+GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "")
+BACKEND_URL          = os.environ.get("BACKEND_URL", "http://localhost:8000")
+ADMIN_URL            = os.environ.get("ADMIN_URL", "http://localhost:5174")
+JWT_SECRET           = os.environ.get("JWT_SECRET", "dev_secret")
+
+_GOOGLE_AUTH_URL  = "https://accounts.google.com/o/oauth2/v2/auth"
+_GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
+_BOT_OAUTH_SCOPES = "openid email"
 from models.job import JobRecord
 from models.notification import NotificationRecord
 from models.task import TaskRecord
@@ -798,6 +813,9 @@ def _bot_config_response(cfg: dict) -> dict:
         "signed_in_email":    ps["signed_in_email"],
         "signed_in_name":     ps["signed_in_name"],
         "setup_running":      setup_running(),
+        "session_cookies":    session_cookies_info(),
+        "bot_oauth_email":    cfg.get("bot_oauth_email", ""),
+        "has_bot_oauth":      bool(cfg.get("bot_refresh_token", "")),
     }
 
 
@@ -863,6 +881,75 @@ def admin_clear_bot_profile(_: User = Depends(get_admin_user)):
     return _bot_config_response(load_bot_config())
 
 
+@router.post("/bot-config/export-cookies")
+async def admin_export_bot_cookies(_: User = Depends(get_admin_user)):
+    """
+    Open the local bot Chrome profile headlessly, extract Google session cookies,
+    and return them as JSON.  Only works when the profile exists on this machine
+    (i.e. run locally after bootstrapping, not on the production server).
+    """
+    cfg = load_bot_config()
+    ps  = profile_status(cfg)
+    if not ps["exists"]:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                            "No bot profile found. Run Setup first on this machine.")
+    try:
+        from playwright.async_api import async_playwright
+        profile_dir = cfg["profile_dir"]
+        async with async_playwright() as pw:
+            ctx = await pw.chromium.launch_persistent_context(
+                profile_dir, headless=True,
+                args=["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage"],
+                timeout=20000,
+            )
+            page = await ctx.new_page()
+            await page.goto("https://accounts.google.com", wait_until="domcontentloaded", timeout=15000)
+            await page.wait_for_timeout(1500)
+            cookies = await ctx.cookies(
+                urls=["https://accounts.google.com", "https://google.com",
+                      "https://meet.google.com"]
+            )
+            await ctx.close()
+
+        # Keep only Google session cookies (skip analytics/ads)
+        keep = {"SID", "HSID", "SSID", "APISID", "SAPISID", "NID",
+                "__Secure-1PSID", "__Secure-3PSID",
+                "__Secure-1PAPISID", "__Secure-3PAPISID",
+                "__Secure-1PSIDTS", "__Secure-3PSIDTS",
+                "__Secure-1PSIDCC", "__Secure-3PSIDCC",
+                "SIDCC", "ACCOUNT_CHOOSER", "GAPS"}
+        filtered = [c for c in cookies if c.get("name") in keep]
+        if not filtered:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                                "No session cookies found — the bot profile may not be signed in.")
+        return {"cookies": filtered, "count": len(filtered)}
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, str(exc))
+
+
+class ImportCookiesIn(BaseModel):
+    cookies: list[dict]
+
+
+@router.post("/bot-config/import-cookies")
+def admin_import_bot_cookies(body: ImportCookiesIn, _: User = Depends(get_admin_user)):
+    """Store exported cookies so the bot can inject them into a fresh browser context."""
+    if not body.cookies:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "No cookies provided.")
+    save_session_cookies(body.cookies)
+    return {"stored": True, "count": len(body.cookies), **session_cookies_info()}
+
+
+@router.delete("/bot-config/session-cookies")
+def admin_clear_session_cookies(_: User = Depends(get_admin_user)):
+    """Remove stored session cookies (forces guest mode until re-imported)."""
+    clear_session_cookies()
+    return {"stored": False}
+
+
 @router.get("/bot-config/health")
 def admin_bot_health(_: User = Depends(get_admin_user)):
     """Return the latest cached bot profile health check result."""
@@ -899,3 +986,90 @@ def admin_reauth_bot(_: User = Depends(get_admin_user)):
             "Sign into your bot Google account, then click 'Complete Setup'."
         ),
     }
+
+
+# ── Bot Google OAuth (production auth — no local browser needed) ──────────────
+
+@router.get("/bot-config/google-oauth/start")
+def admin_bot_oauth_start(_: User = Depends(get_admin_user)):
+    """
+    Return a Google OAuth URL the admin uses to authorise the bot account.
+    The resulting refresh token is stored in bot_config.json and used by the
+    runner to sign the bot into Google Meet via MergeSession on every session.
+    """
+    if not GOOGLE_CLIENT_ID:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                            "GOOGLE_CLIENT_ID is not configured.")
+    from jose import jwt as _jwt
+    state = _jwt.encode(
+        {"type": "bot_oauth", "exp": time.time() + 600},
+        JWT_SECRET, algorithm="HS256",
+    )
+    params = {
+        "client_id":     GOOGLE_CLIENT_ID,
+        "redirect_uri":  f"{BACKEND_URL}/admin/bot-config/google-oauth/callback",
+        "response_type": "code",
+        "scope":         _BOT_OAUTH_SCOPES,
+        "access_type":   "offline",
+        "prompt":        "consent",   # force refresh_token every time
+        "state":         state,
+    }
+    return {"url": f"{_GOOGLE_AUTH_URL}?{urllib.parse.urlencode(params)}"}
+
+
+@router.get("/bot-config/google-oauth/callback")
+def admin_bot_oauth_callback(code: str = None, state: str = None, error: str = None):
+    """
+    Google redirects here after the admin authorises the bot account.
+    Exchanges the code for tokens and stores the refresh token in bot_config.json.
+    """
+    admin_page = f"{ADMIN_URL.rstrip('/')}/bot-config"
+
+    if error or not code:
+        return RedirectResponse(f"{admin_page}?error=google_denied")
+
+    from jose import jwt as _jwt, JWTError
+    try:
+        payload = _jwt.decode(state or "", JWT_SECRET, algorithms=["HS256"])
+        if payload.get("type") != "bot_oauth":
+            raise JWTError
+    except JWTError:
+        return RedirectResponse(f"{admin_page}?error=invalid_state")
+
+    import requests as _req
+    token_res = _req.post(_GOOGLE_TOKEN_URL, data={
+        "code":          code,
+        "client_id":     GOOGLE_CLIENT_ID,
+        "client_secret": GOOGLE_CLIENT_SECRET,
+        "redirect_uri":  f"{BACKEND_URL}/admin/bot-config/google-oauth/callback",
+        "grant_type":    "authorization_code",
+    })
+    if not token_res.ok:
+        return RedirectResponse(f"{admin_page}?error=google_token")
+
+    tokens        = token_res.json()
+    refresh_token = tokens.get("refresh_token")
+    access_token  = tokens.get("access_token", "")
+
+    email = None
+    if access_token:
+        info = _req.get(
+            "https://www.googleapis.com/oauth2/v2/userinfo",
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+        if info.ok:
+            email = info.json().get("email")
+
+    updates: dict = {"bot_oauth_email": email or ""}
+    if refresh_token:
+        updates["bot_refresh_token"] = refresh_token
+
+    save_bot_config(updates)
+    return RedirectResponse(f"{admin_page}?connected=google")
+
+
+@router.delete("/bot-config/google-oauth")
+def admin_bot_oauth_disconnect(_: User = Depends(get_admin_user)):
+    """Remove the stored bot OAuth refresh token."""
+    save_bot_config({"bot_refresh_token": "", "bot_oauth_email": ""})
+    return _bot_config_response(load_bot_config())

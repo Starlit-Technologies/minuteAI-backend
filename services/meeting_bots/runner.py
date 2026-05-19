@@ -499,6 +499,80 @@ _CLICK_JOIN_BUTTON_JS = """
 """
 
 
+async def _sign_in_google_meet_as_bot(page, refresh_token: str, session_id: str) -> bool:
+    """
+    Sign the bot account into a fresh browser context using its stored OAuth
+    refresh token.  Same MergeSession/OAuthLogin approach as _sign_in_google_meet
+    but uses the dedicated bot refresh token instead of a user's connected account.
+    """
+    import requests as _req
+
+    if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
+        _log(session_id, "Bot OAuth sign-in skipped — no OAuth client credentials configured")
+        return False
+
+    try:
+        resp = _req.post("https://oauth2.googleapis.com/token", data={
+            "client_id":     GOOGLE_CLIENT_ID,
+            "client_secret": GOOGLE_CLIENT_SECRET,
+            "refresh_token": refresh_token,
+            "grant_type":    "refresh_token",
+        }, timeout=15)
+        if not resp.ok:
+            _log(session_id, f"Bot OAuth token refresh failed: HTTP {resp.status_code}")
+            return False
+        access_token = resp.json().get("access_token")
+        if not access_token:
+            _log(session_id, "Bot OAuth token refresh returned no access_token")
+            return False
+    except Exception as exc:
+        _log(session_id, f"Bot OAuth token refresh error: {exc}")
+        return False
+
+    candidates = [
+        (
+            "MergeSession",
+            f"https://accounts.google.com/MergeSession"
+            f"?service=mail&continue=https://myaccount.google.com"
+            f"&token={access_token}&source=googletalkplugin"
+        ),
+        (
+            "OAuthLogin",
+            f"https://accounts.google.com/OAuthLogin"
+            f"?source=ogb&issuedTo={GOOGLE_CLIENT_ID}&token={access_token}"
+        ),
+    ]
+
+    async def _is_signed_in_now() -> bool:
+        try:
+            cookies = await page.context.cookies(
+                urls=["https://accounts.google.com", "https://google.com"]
+            )
+            return any(c["name"] in {"SID", "__Secure-3PSID", "HSID", "SSID"} for c in cookies)
+        except Exception:
+            return False
+
+    for method, sign_in_url in candidates:
+        try:
+            await page.goto(sign_in_url, wait_until="domcontentloaded", timeout=20000)
+            await page.wait_for_timeout(2000)
+            if await _is_signed_in_now():
+                _log(session_id, f"Bot OAuth sign-in confirmed via {method}")
+                return True
+            await page.goto("https://myaccount.google.com", wait_until="domcontentloaded", timeout=15000)
+            await page.wait_for_timeout(1500)
+            if "myaccount.google.com" in page.url and "signin" not in page.url:
+                _log(session_id, f"Bot OAuth sign-in confirmed via {method} (myaccount)")
+                return True
+            _log(session_id, f"[{method}] bot sign-in not confirmed")
+        except Exception as exc:
+            _log(session_id, f"[{method}] bot sign-in attempt raised: {exc}")
+
+    _log(session_id, "Bot OAuth sign-in failed — joining as guest")
+    _flag_auth_failure("Bot OAuth refresh token may have been revoked. Re-connect in Admin → Bot Config.")
+    return False
+
+
 async def _sign_in_google_meet(page, user_id: str, session_id: str) -> bool:
     """
     Converts the user's stored Google OAuth access token into a browser session
@@ -1215,9 +1289,9 @@ async def _run_playwright_session(ctx: BotRunContext):
                 # This is the Fireflies-style approach: Meet sees a real Google user, not a guest.
                 bot_profile = _bot_profile_dir if _bot_profile_dir and Path(_bot_profile_dir).is_dir() else None
 
-                # Load exported session cookies (production auth path — no local profile on Render).
-                from models.bot_config import load_session_cookies as _load_session_cookies
-                _session_cookies = _load_session_cookies() if ctx.platform == "google_meet" else None
+                # Bot OAuth refresh token — the primary production auth method.
+                # Admin connects the bot Google account once via Admin → Bot Config → Connect Google.
+                _bot_refresh_token = _bcfg.get("bot_refresh_token", "") or ""
 
                 shared_context_kwargs = dict(
                     viewport={"width": 1440, "height": 900},
@@ -1228,15 +1302,8 @@ async def _run_playwright_session(ctx: BotRunContext):
                     timezone_id="America/New_York",
                 )
 
-                if _session_cookies and ctx.platform == "google_meet":
-                    # Cookie injection mode: fresh headless context + stored Google session cookies.
-                    # Used on Render where the local Chrome profile isn't available.
-                    browser = await pw.chromium.launch(headless=True, args=chromium_args)
-                    context = await browser.new_context(**shared_context_kwargs)
-                    await context.add_cookies(_session_cookies)
-                    _log(ctx.session_id, f"Launched with injected session cookies ({len(_session_cookies)} cookies)")
-                elif bot_profile and ctx.platform == "google_meet":
-                    # launch_persistent_context owns the browser — no separate browser.close() needed.
+                if bot_profile and ctx.platform == "google_meet":
+                    # Persistent profile: launch_persistent_context owns the browser.
                     browser = None
                     context = await pw.chromium.launch_persistent_context(
                         user_data_dir=bot_profile,
@@ -1265,18 +1332,21 @@ async def _run_playwright_session(ctx: BotRunContext):
                     # a separate invitation for the bot account.
                     use_user_oauth = ctx.source == "user_calendar"
 
-                    if _session_cookies and not use_user_oauth:
-                        # Injected cookies: bot is already authenticated as the configured bot account
-                        sign_in_attempted = True
-                        sign_in_ok        = True
-                        _log(ctx.session_id, f"Joining as bot account ({_bot_email or 'bot'}) via injected session cookies")
-                    elif bot_profile and not use_user_oauth:
-                        # Manual sessions: use the pre-signed-in bot profile
+                    if bot_profile and not use_user_oauth:
+                        # Persistent profile: already signed in
                         sign_in_attempted = True
                         sign_in_ok        = True
                         _log(ctx.session_id, f"Joining as bot account ({_bot_email or 'bot'}) via persistent profile")
+                    elif _bot_refresh_token and not use_user_oauth:
+                        # OAuth mode: fresh context, sign in via MergeSession with stored refresh token
+                        sign_in_attempted = True
+                        sign_in_ok = await _sign_in_google_meet_as_bot(page, _bot_refresh_token, ctx.session_id)
+                        if sign_in_ok:
+                            _log(ctx.session_id, f"Joining as bot account ({_bot_email or 'bot'}) via OAuth")
+                        else:
+                            _log(ctx.session_id, "Bot OAuth sign-in failed — joining as guest")
                     else:
-                        # User-calendar sessions (or no bot profile/cookies): sign in as the user
+                        # User-calendar sessions (or no bot configured): sign in as the meeting owner
                         sign_in_attempted = True
                         sign_in_ok = await _sign_in_google_meet(page, ctx.user_id, ctx.session_id)
                         if sign_in_ok:
