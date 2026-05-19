@@ -1,10 +1,20 @@
 services:
+  - type: redis
+    name: minuteai-redis
+    plan: free
+    maxmemoryPolicy: noeviction
+
   - type: web
     name: minuteai-backend
     runtime: python
     plan: standard  # 2 GB RAM — required for headless Chromium (meeting bot)
     buildCommand: pip install -r requirements.txt && PLAYWRIGHT_BROWSERS_PATH=/opt/render/project/src/.playwright playwright install chromium
-    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    # Run the RQ worker (with scheduler for enqueue_at) alongside uvicorn.
+    # Both share the same container and persistent disk so the bot profile is
+    # accessible from the worker without any cross-service disk sharing.
+    startCommand: >-
+      rq worker minuteai-bots --with-scheduler --url $REDIS_URL &
+      uvicorn main:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /health
     autoDeployTrigger: commit
 
@@ -36,6 +46,13 @@ services:
         value: https://minuteai-frontend.onrender.com
       - key: CORS_ORIGINS
         value: https://minuteai-frontend.onrender.com,https://minuteai-admin.onrender.com
+
+      # ── Redis (job queue for meeting bot sessions) ───────────────────────────
+      - key: REDIS_URL
+        fromService:
+          name: minuteai-redis
+          type: redis
+          property: connectionString
 
       # ── Secrets (set in Render dashboard, not committed) ─────────────────────
       - key: DATABASE_URL

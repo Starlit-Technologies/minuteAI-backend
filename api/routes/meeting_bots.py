@@ -20,6 +20,7 @@ from models.user import User
 from models.user import TeamMember, Workspace
 from services.meeting_bots.platforms import detect_platform
 from services.meeting_bots.runner import signal_stop, start_meeting_bot_session
+from services.queue import cancel_queued_session
 
 router = APIRouter(prefix="/meeting-bots", tags=["meeting-bots"])
 MEETING_BOT_RECORDER_NAME = os.environ.get("MEETING_BOT_RECORDER_NAME", "MinuteAI Recorder").strip() or "MinuteAI Recorder"
@@ -243,6 +244,7 @@ def cancel_meeting_bot_session(
     if session.status in {"completed", "failed", "cancelled"}:
         return _serialize(session)
 
+    cancel_queued_session(session_id)
     updated = update_session(
         session_id,
         status="cancelled",

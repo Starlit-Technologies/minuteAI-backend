@@ -1398,26 +1398,31 @@ async def _run_playwright_session(ctx: BotRunContext):
         raise
 
 
-# ── Thread entry point ────────────────────────────────────────────────────────
+# ── Job entry point (called by RQ worker or directly by thread fallback) ──────
 
 def _run_session(session_id: str):
     session = get_session(session_id)
     if not session or session.status == "cancelled":
         return
 
-    if session.scheduled_for:
-        # Show "scheduled" in the UI while waiting so users know the bot will join
-        update_session(session_id, status="scheduled")
-        _EARLY_JOIN_SECONDS = 90  # open browser 90s before meeting start
-        while True:
-            latest = get_session(session_id)
-            if not latest or latest.status == "cancelled":
-                return
-            seconds_until = (latest.scheduled_for - datetime.utcnow()).total_seconds()
-            if seconds_until <= _EARLY_JOIN_SECONDS:
-                break
-            _log(session_id, f"Scheduled — starting in {int(seconds_until)}s")
-            time.sleep(min(15, max(1, seconds_until - _EARLY_JOIN_SECONDS)))
+    # With RQ, the job is enqueued_at (scheduled_for - 90s) so by the time
+    # this function runs we're already within the early-join window.
+    # In thread-fallback mode we still do the busy-wait for compatibility.
+    if session.scheduled_for and session_id not in _running_sessions:
+        from services.queue import is_redis_available
+        if not is_redis_available():
+            # Thread fallback: busy-wait until 90s before start
+            update_session(session_id, status="scheduled")
+            _EARLY_JOIN_SECONDS = 90
+            while True:
+                latest = get_session(session_id)
+                if not latest or latest.status == "cancelled":
+                    return
+                seconds_until = (latest.scheduled_for - datetime.utcnow()).total_seconds()
+                if seconds_until <= _EARLY_JOIN_SECONDS:
+                    break
+                _log(session_id, f"Scheduled — starting in {int(seconds_until)}s")
+                time.sleep(min(15, max(1, seconds_until - _EARLY_JOIN_SECONDS)))
 
     if MEETING_BOT_MODE == "stub":
         update_session(
@@ -1457,6 +1462,31 @@ def _run_session(session_id: str):
 
 
 def start_meeting_bot_session(session_id: str):
+    """
+    Enqueue the session to Redis/RQ if available, otherwise fall back to a
+    daemon thread (local dev without Redis).
+
+    For scheduled sessions, RQ's enqueue_at fires the job 90s before the
+    meeting starts.  For immediate sessions the job runs right away.
+    """
+    from services.queue import enqueue_session, is_redis_available
+
+    session = get_session(session_id)
+    if not session or session.status == "cancelled":
+        return
+
+    if is_redis_available():
+        if session.scheduled_for:
+            from datetime import timedelta
+            # Fire 90s early so the browser has time to open and sign in
+            run_at = session.scheduled_for - timedelta(seconds=90)
+            update_session(session_id, status="scheduled")
+            enqueue_session(session_id, run_at=run_at)
+        else:
+            enqueue_session(session_id)
+        return
+
+    # ── Thread fallback (no Redis / local dev) ────────────────────────────────
     with _running_lock:
         if session_id in _running_sessions:
             return
@@ -1473,12 +1503,14 @@ def start_meeting_bot_session(session_id: str):
 
 
 def start_pending_meeting_bot_sessions():
+    """Re-enqueue any sessions that were pending when the server last restarted."""
     for session in list_startable_sessions():
         start_meeting_bot_session(session.id)
 
 
 def _pending_sessions_poll_loop():
-    """Pick up newly created sessions every 30 s (safety net for the calendar sync)."""
+    """Safety-net poll every 30s — catches sessions the calendar sync creates
+    while the server is running (thread fallback / Redis down)."""
     while True:
         time.sleep(30)
         try:

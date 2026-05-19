@@ -24,3 +24,5 @@ assemblyai
 deepL
 deepgram-sdk
 websockets
+redis
+rq
