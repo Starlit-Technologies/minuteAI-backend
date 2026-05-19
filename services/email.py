@@ -39,6 +39,49 @@ def send_minutes_ready(to_email: str, job_id: str, meeting_title: str):
     })
 
 
+def send_attendee_recap(
+    to_email: str,
+    job_id: str,
+    meeting_title: str,
+    recorded_by_name: str | None,
+    recorded_by_email: str | None,
+):
+    if not resend.api_key:
+        return
+    results_url = f"{APP_URL}/results/{job_id}"
+    recorder    = recorded_by_name or recorded_by_email or "Someone"
+    resend.Emails.send({
+        "from": FROM_ADDRESS,
+        "to": [to_email],
+        "subject": f"Meeting recap: {meeting_title}",
+        "html": f"""
+        <div style="font-family:system-ui,sans-serif;max-width:520px;margin:40px auto;color:#374151">
+          <div style="background:linear-gradient(135deg,#7c3aed,#4f46e5);padding:32px;border-radius:16px 16px 0 0;text-align:center">
+            <h1 style="color:#fff;margin:0;font-size:24px;font-weight:700">MinuteAI</h1>
+            <p style="color:#ddd6fe;margin:8px 0 0">Your meeting recap is ready</p>
+          </div>
+          <div style="border:1px solid #e5e7eb;border-top:none;border-radius:0 0 16px 16px;padding:32px">
+            <p style="font-size:15px;line-height:1.6;margin:0 0 6px">
+              <strong>{recorder}</strong> used MinuteAI to record your meeting.
+            </p>
+            <p style="font-size:15px;line-height:1.6;margin:0 0 24px;color:#6b7280">
+              The recap for <strong>{meeting_title}</strong> is now available.
+            </p>
+            <a href="{results_url}"
+               style="display:inline-block;background:#7c3aed;color:#fff;text-decoration:none;
+                      padding:12px 28px;border-radius:10px;font-weight:600;font-size:15px;margin-bottom:28px">
+              View meeting recap &rarr;
+            </a>
+            <hr style="border:none;border-top:1px solid #f1f5f9;margin:0 0 16px">
+            <p style="font-size:12px;color:#9ca3af;margin:0">
+              Meeting notes recorded on behalf of {recorded_by_email or recorder}.
+            </p>
+          </div>
+        </div>
+        """,
+    })
+
+
 def send_bot_auth_alert(to_emails: list[str], bot_email: str | None, error: str):
     if not resend.api_key:
         return

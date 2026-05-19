@@ -27,6 +27,8 @@ def create_processing_job_from_media(
     email: Optional[str] = None,
     user_id: Optional[str] = None,
     workspace_id: Optional[str] = None,
+    attendees: Optional[list[str]] = None,
+    meeting_title: Optional[str] = None,
 ) -> str:
     job_id = str(uuid.uuid4())
     suffix = Path(original_filename).suffix.lower() or Path(media_path).suffix.lower() or ".mp4"
@@ -37,6 +39,12 @@ def create_processing_job_from_media(
     else:
         final_media_path = media_path
 
+    config: dict = {}
+    if attendees:
+        config["attendees"] = attendees
+    if meeting_title:
+        config["meeting_title"] = meeting_title
+
     store.create(Job(
         id=job_id,
         status="uploading",
@@ -44,6 +52,7 @@ def create_processing_job_from_media(
         user_id=user_id,
         workspace_id=workspace_id,
         audio_path=final_media_path,
+        job_config=config if config else None,
     ))
 
     # Also upload to R2 if configured
@@ -243,6 +252,39 @@ def run_pipeline(job_id: str):
 
         if job.email:
             send_minutes_ready(job.email, job_id, minutes.get("title", "Meeting"))
+
+        # Email all meeting attendees (stored from calendar event)
+        cfg          = job.job_config or {}
+        attendees    = cfg.get("attendees") or []
+        owner_email  = job.email or ""
+        owner_name   = None
+        if job.user_id:
+            try:
+                from models.user import User
+                from db.base import SessionLocal as _SL
+                with _SL() as _db:
+                    u = _db.get(User, job.user_id)
+                    if u:
+                        owner_name  = u.name
+                        owner_email = owner_email or u.email
+            except Exception:
+                pass
+
+        if attendees:
+            from services.email import send_attendee_recap
+            for addr in attendees:
+                if addr.lower() == (owner_email or "").lower():
+                    continue  # owner already got the full minutes email
+                try:
+                    send_attendee_recap(
+                        to_email=addr,
+                        job_id=job_id,
+                        meeting_title=meeting_title,
+                        recorded_by_name=owner_name,
+                        recorded_by_email=owner_email,
+                    )
+                except Exception:
+                    pass
 
     except Exception as exc:
         store.update(job_id, status="error", message=str(exc))

@@ -1375,6 +1375,8 @@ async def _run_playwright_session(ctx: BotRunContext):
                 original_filename=f"{ctx.session_id}.webm",
                 user_id=session.user_id,
                 workspace_id=session.workspace_id,
+                attendees=session.attendees or None,
+                meeting_title=session.title or None,
             )
             update_session(
                 ctx.session_id,

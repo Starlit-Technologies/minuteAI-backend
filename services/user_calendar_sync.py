@@ -152,6 +152,14 @@ def _sync_google(account: ConnectedAccount):
         if get_session_by_user_event(account.user_id, event_id):
             continue
 
+        # Collect attendee emails (accepted or tentative, skip declined + the calendar owner)
+        attendees = [
+            a["email"] for a in event.get("attendees", [])
+            if a.get("email")
+            and a.get("responseStatus") != "declined"
+            and not a.get("self")
+        ]
+
         start_str = (event.get("start") or {}).get("dateTime") or (event.get("start") or {}).get("date")
         if not start_str:
             continue
@@ -175,6 +183,7 @@ def _sync_google(account: ConnectedAccount):
             bot_name="MinuteAI Recorder", calendar_event_id=event_id,
             source="user_calendar", title=event.get("summary") or "Meeting",
             scheduled_for=scheduled, duration_minutes=duration,
+            attendees=attendees or None,
         )
         start_meeting_bot_session(session.id)
         logger.info("Scheduled bot for Google Meet event %s (user %s)", event_id, account.user_id)

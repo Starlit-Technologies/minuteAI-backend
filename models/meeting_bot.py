@@ -31,6 +31,7 @@ class MeetingBotSessionRecord(Base):
     recording_path = Column(String,  nullable=True)
     job_id         = Column(String,  nullable=True, index=True)
     logs_json      = Column(Text,    nullable=True)
+    attendees_json = Column(Text,    nullable=True)
     created_at     = Column(DateTime, server_default=func.now())
 
 
@@ -55,6 +56,7 @@ class MeetingBotSession:
     recording_path: Optional[str]
     job_id: Optional[str]
     logs: list[str] = field(default_factory=list)
+    attendees: list[str] = field(default_factory=list)
     created_at: Optional[datetime] = None
 
 
@@ -79,6 +81,7 @@ def _to_dataclass(record: MeetingBotSessionRecord) -> MeetingBotSession:
         recording_path=record.recording_path,
         job_id=record.job_id,
         logs=json.loads(record.logs_json) if getattr(record, "logs_json", None) else [],
+        attendees=json.loads(record.attendees_json) if getattr(record, "attendees_json", None) else [],
         created_at=record.created_at,
     )
 
@@ -96,6 +99,7 @@ def create_session(
     title: Optional[str] = None,
     scheduled_for: Optional[datetime] = None,
     duration_minutes: Optional[int] = None,
+    attendees: Optional[list[str]] = None,
 ) -> MeetingBotSession:
     session_id = str(uuid.uuid4())
     with SessionLocal() as db:
@@ -113,6 +117,7 @@ def create_session(
             status="queued",
             scheduled_for=scheduled_for,
             duration_minutes=duration_minutes,
+            attendees_json=json.dumps(attendees) if attendees else None,
         )
         db.add(record)
         db.commit()
