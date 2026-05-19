@@ -35,8 +35,8 @@ _LANG_MAP = {
     "el": "el",  "id": "id",  "vi": "vi",  "th": "th",  "ms": "ms",
 }
 
-# Words with confidence below this threshold are flagged as low-quality
-CONFIDENCE_THRESHOLD = 0.75
+# Words with confidence below this threshold are dropped from reliable_text
+CONFIDENCE_THRESHOLD = 0.65
 
 
 def get_deepgram_lang(iso_code: str) -> str:
@@ -111,13 +111,11 @@ class DeepgramTranscript:
 
     @property
     def reliable_text(self) -> str:
-        """Text with low-confidence words replaced by [unclear]."""
+        """Text with low-confidence words omitted (rather than shown as noise)."""
         if not self.words:
             return self.text
-        parts = []
-        for w in self.words:
-            parts.append(w.punctuated_word if w.is_reliable else "[unclear]")
-        return " ".join(parts)
+        parts = [w.punctuated_word for w in self.words if w.is_reliable]
+        return " ".join(parts) if parts else ""
 
     @property
     def has_unclear_words(self) -> bool:

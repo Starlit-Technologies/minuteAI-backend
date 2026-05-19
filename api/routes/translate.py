@@ -159,6 +159,7 @@ _HALLUCINATION_PHRASES = {
     "thank you.", "thank you", "thanks for watching.", "thanks for watching",
     "you", "bye.", "bye", "goodbye.", "please subscribe.", "subtitles by",
     "[music]", "(music)", "[applause]", "♪", "...", ". . .", "you.",
+    "[unclear]",
 }
 
 
