@@ -85,6 +85,26 @@ services:
         sync: false
       - key: ZOOM_OAUTH_CLIENT_SECRET
         sync: false
+      - key: SLACK_CLIENT_ID
+        sync: false
+      - key: SLACK_CLIENT_SECRET
+        sync: false
+      - key: NOTION_CLIENT_ID
+        sync: false
+      - key: NOTION_CLIENT_SECRET
+        sync: false
+      - key: HUBSPOT_CLIENT_ID
+        sync: false
+      - key: HUBSPOT_CLIENT_SECRET
+        sync: false
+      - key: LINEAR_CLIENT_ID
+        sync: false
+      - key: LINEAR_CLIENT_SECRET
+        sync: false
+      - key: MICROSOFT_CLIENT_ID
+        sync: false
+      - key: MICROSOFT_CLIENT_SECRET
+        sync: false
       - key: BACKEND_URL
         value: https://minuteai-backend.onrender.com
 

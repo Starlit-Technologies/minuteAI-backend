@@ -90,6 +90,7 @@ def run_migrations():
             "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS r2_audio_key TEXT",
             "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS speaker_map_json TEXT",
             "ALTER TABLE meeting_bot_sessions ADD COLUMN IF NOT EXISTS attendees_json TEXT",
+            "ALTER TABLE connected_accounts ADD COLUMN IF NOT EXISTS settings_json TEXT",
         ]
     else:
         migrations = [
@@ -136,6 +137,7 @@ def run_migrations():
             "ALTER TABLE jobs ADD COLUMN r2_audio_key TEXT",
             "ALTER TABLE jobs ADD COLUMN speaker_map_json TEXT",
             "ALTER TABLE meeting_bot_sessions ADD COLUMN attendees_json TEXT",
+            "ALTER TABLE connected_accounts ADD COLUMN settings_json TEXT",
         ]
     with engine.connect() as conn:
         for sql in migrations:

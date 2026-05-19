@@ -240,6 +240,14 @@ def run_pipeline(job_id: str):
         except Exception:
             pass
 
+        # Run post-meeting integrations (Slack, Notion, HubSpot, Linear, etc.)
+        if job.user_id:
+            try:
+                from services.integrations.runner import run_integrations
+                run_integrations(job.user_id, job_id, minutes)
+            except Exception:
+                pass
+
         meeting_title = minutes.get("title") or "Your meeting"
         if job.user_id:
             create_notification(

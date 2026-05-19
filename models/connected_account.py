@@ -1,5 +1,6 @@
+import json
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
 
@@ -20,6 +21,7 @@ class ConnectedAccountRecord(Base):
     email         = Column(String, nullable=True)
     auto_join     = Column(Boolean, nullable=False, default=True)
     created_at    = Column(DateTime, server_default=func.now())
+    settings_json = Column(Text, nullable=True)
 
 
 @dataclass
@@ -33,9 +35,14 @@ class ConnectedAccount:
     email: Optional[str]
     auto_join: bool
     created_at: Optional[datetime]
+    settings: dict = field(default_factory=dict)
 
 
 def _to_dataclass(record: ConnectedAccountRecord) -> ConnectedAccount:
+    try:
+        settings = json.loads(record.settings_json) if record.settings_json else {}
+    except Exception:
+        settings = {}
     return ConnectedAccount(
         id=record.id,
         user_id=record.user_id,
@@ -46,6 +53,7 @@ def _to_dataclass(record: ConnectedAccountRecord) -> ConnectedAccount:
         email=record.email,
         auto_join=bool(record.auto_join),
         created_at=record.created_at,
+        settings=settings,
     )
 
 
@@ -80,6 +88,7 @@ def upsert_connected_account(
     refresh_token: Optional[str],
     token_expiry: Optional[datetime],
     email: Optional[str],
+    settings: Optional[dict] = None,
 ) -> ConnectedAccount:
     with SessionLocal() as db:
         record = (
@@ -97,6 +106,8 @@ def upsert_connected_account(
             record.token_expiry = token_expiry
             if email:
                 record.email = email
+            if settings is not None:
+                record.settings_json = json.dumps(settings)
         else:
             record = ConnectedAccountRecord(
                 id=str(uuid.uuid4()),
@@ -107,6 +118,7 @@ def upsert_connected_account(
                 token_expiry=token_expiry,
                 email=email,
                 auto_join=True,
+                settings_json=json.dumps(settings) if settings is not None else None,
             )
             db.add(record)
         db.commit()
@@ -145,6 +157,35 @@ def update_auto_join(user_id: str, provider: str, auto_join: bool) -> Optional[C
         db.commit()
         db.refresh(record)
         return _to_dataclass(record)
+
+
+def update_integration_settings(user_id: str, provider: str, settings: dict) -> Optional[ConnectedAccount]:
+    """Update per-integration config (channel, database ID, etc.)"""
+    with SessionLocal() as db:
+        record = (
+            db.query(ConnectedAccountRecord)
+            .filter(
+                ConnectedAccountRecord.user_id == user_id,
+                ConnectedAccountRecord.provider == provider,
+            )
+            .first()
+        )
+        if not record:
+            return None
+        try:
+            existing = json.loads(record.settings_json) if record.settings_json else {}
+        except Exception:
+            existing = {}
+        existing.update(settings)
+        record.settings_json = json.dumps(existing)
+        db.commit()
+        db.refresh(record)
+        return _to_dataclass(record)
+
+
+def get_integration_settings(user_id: str, provider: str) -> dict:
+    account = get_connected_account(user_id, provider)
+    return account.settings if account else {}
 
 
 def list_all_for_sync() -> list[ConnectedAccount]:

@@ -16,6 +16,7 @@ from models.connected_account import (
     get_connected_account,
     list_connected_accounts,
     update_auto_join,
+    update_integration_settings,
     upsert_connected_account,
 )
 from models.user import User
@@ -26,6 +27,16 @@ GOOGLE_CLIENT_ID     = os.environ.get("GOOGLE_CLIENT_ID", "")
 GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "")
 ZOOM_CLIENT_ID       = os.environ.get("ZOOM_OAUTH_CLIENT_ID", "")
 ZOOM_CLIENT_SECRET   = os.environ.get("ZOOM_OAUTH_CLIENT_SECRET", "")
+SLACK_CLIENT_ID      = os.environ.get("SLACK_CLIENT_ID", "")
+SLACK_CLIENT_SECRET  = os.environ.get("SLACK_CLIENT_SECRET", "")
+NOTION_CLIENT_ID     = os.environ.get("NOTION_CLIENT_ID", "")
+NOTION_CLIENT_SECRET = os.environ.get("NOTION_CLIENT_SECRET", "")
+HUBSPOT_CLIENT_ID    = os.environ.get("HUBSPOT_CLIENT_ID", "")
+HUBSPOT_CLIENT_SECRET = os.environ.get("HUBSPOT_CLIENT_SECRET", "")
+LINEAR_CLIENT_ID     = os.environ.get("LINEAR_CLIENT_ID", "")
+LINEAR_CLIENT_SECRET = os.environ.get("LINEAR_CLIENT_SECRET", "")
+MICROSOFT_CLIENT_ID  = os.environ.get("MICROSOFT_CLIENT_ID", "")
+MICROSOFT_CLIENT_SECRET = os.environ.get("MICROSOFT_CLIENT_SECRET", "")
 BACKEND_URL          = os.environ.get("BACKEND_URL", "http://localhost:8000")
 FRONTEND_URL         = os.environ.get("APP_URL", "http://localhost:5173")
 JWT_SECRET           = os.environ.get("JWT_SECRET", "dev_secret")
@@ -37,6 +48,21 @@ _GOOGLE_SCOPES        = "openid email https://www.googleapis.com/auth/calendar.r
 
 _ZOOM_AUTH_URL  = "https://zoom.us/oauth/authorize"
 _ZOOM_TOKEN_URL = "https://zoom.us/oauth/token"
+
+_SLACK_AUTH_URL  = "https://slack.com/oauth/v2/authorize"
+_SLACK_TOKEN_URL = "https://slack.com/api/oauth.v2.access"
+
+_NOTION_AUTH_URL  = "https://api.notion.com/v1/oauth/authorize"
+_NOTION_TOKEN_URL = "https://api.notion.com/v1/oauth/token"
+
+_HUBSPOT_AUTH_URL  = "https://app.hubspot.com/oauth/authorize"
+_HUBSPOT_TOKEN_URL = "https://api.hubapi.com/oauth/v1/token"
+
+_LINEAR_AUTH_URL  = "https://linear.app/oauth/authorize"
+_LINEAR_TOKEN_URL = "https://api.linear.app/oauth/token"
+
+_MICROSOFT_AUTH_URL  = "https://login.microsoftonline.com/common/oauth2/v2.0/authorize"
+_MICROSOFT_TOKEN_URL = "https://login.microsoftonline.com/common/oauth2/v2.0/token"
 
 
 def _make_state(user_id: str, origin: str = "") -> str:
@@ -57,12 +83,32 @@ class UpdateIntegrationBody(BaseModel):
     auto_join: Optional[bool] = None
 
 
+class IntegrationSettingsIn(BaseModel):
+    database_id: Optional[str] = None   # Notion
+    folder_id: Optional[str] = None     # Google Drive
+    team_id: Optional[str] = None       # Linear
+    channel_id: Optional[str] = None    # Slack
+    url: Optional[str] = None           # Webhook
+
+
+class WebhookConnectBody(BaseModel):
+    url: str
+
+
 @router.get("")
 def get_integrations(user: User = Depends(get_current_user)):
     accounts = list_connected_accounts(user.id)
-    result = {a.provider: {"connected": True, "email": a.email, "auto_join": a.auto_join} for a in accounts}
+    result = {
+        a.provider: {
+            "connected": True,
+            "email": a.email,
+            "auto_join": a.auto_join,
+            "settings": a.settings,
+        }
+        for a in accounts
+    }
     for provider in ("google", "zoom"):
-        result.setdefault(provider, {"connected": False, "email": None, "auto_join": True})
+        result.setdefault(provider, {"connected": False, "email": None, "auto_join": True, "settings": {}})
     return result
 
 
@@ -188,6 +234,384 @@ def callback_zoom(code: str = None, state: str = None, error: str = None):
     return RedirectResponse(f"{base}/settings?tab=integrations&connected=zoom")
 
 
+# ── Slack ─────────────────────────────────────────────────────────────────────
+
+@router.get("/connect/slack")
+def connect_slack(origin: str = Query(default=""), user: User = Depends(get_current_user)):
+    state = _make_state(user.id, origin)
+    params = {
+        "client_id": SLACK_CLIENT_ID,
+        "redirect_uri": f"{BACKEND_URL}/integrations/callback/slack",
+        "scope": "incoming-webhook",
+        "state": state,
+    }
+    return {"url": f"{_SLACK_AUTH_URL}?{urllib.parse.urlencode(params)}"}
+
+
+@router.get("/callback/slack")
+def callback_slack(code: str = None, state: str = None, error: str = None):
+    decoded = _decode_state(state) if state else None
+    base = (decoded or {}).get("origin") or FRONTEND_URL
+
+    if error or not code or not state:
+        return RedirectResponse(f"{base}/settings?tab=integrations&error=slack_denied")
+
+    if not decoded:
+        return RedirectResponse(f"{base}/settings?tab=integrations&error=invalid_state")
+
+    user_id = decoded["user_id"]
+
+    credentials = base64.b64encode(f"{SLACK_CLIENT_ID}:{SLACK_CLIENT_SECRET}".encode()).decode()
+    token_res = requests.post(
+        _SLACK_TOKEN_URL,
+        headers={"Authorization": f"Basic {credentials}"},
+        data={
+            "code": code,
+            "redirect_uri": f"{BACKEND_URL}/integrations/callback/slack",
+            "grant_type": "authorization_code",
+        },
+    )
+    if not token_res.ok:
+        return RedirectResponse(f"{base}/settings?tab=integrations&error=slack_token")
+
+    tokens = token_res.json()
+    if not tokens.get("ok"):
+        return RedirectResponse(f"{base}/settings?tab=integrations&error=slack_token")
+
+    access_token = tokens["access_token"]
+    webhook = tokens.get("incoming_webhook", {})
+    settings = {
+        "webhook_url": webhook.get("url", ""),
+        "channel": webhook.get("channel", ""),
+        "channel_id": webhook.get("channel_id", ""),
+    }
+    email = tokens.get("team", {}).get("name")  # team name used as display label
+
+    upsert_connected_account(
+        user_id=user_id, provider="slack",
+        access_token=access_token, refresh_token=None,
+        token_expiry=None, email=email,
+        settings=settings,
+    )
+    return RedirectResponse(f"{base}/settings?tab=integrations&connected=slack")
+
+
+# ── Notion ────────────────────────────────────────────────────────────────────
+
+@router.get("/connect/notion")
+def connect_notion(origin: str = Query(default=""), user: User = Depends(get_current_user)):
+    state = _make_state(user.id, origin)
+    params = {
+        "client_id": NOTION_CLIENT_ID,
+        "redirect_uri": f"{BACKEND_URL}/integrations/callback/notion",
+        "response_type": "code",
+        "state": state,
+    }
+    return {"url": f"{_NOTION_AUTH_URL}?{urllib.parse.urlencode(params)}"}
+
+
+@router.get("/callback/notion")
+def callback_notion(code: str = None, state: str = None, error: str = None):
+    decoded = _decode_state(state) if state else None
+    base = (decoded or {}).get("origin") or FRONTEND_URL
+
+    if error or not code or not state:
+        return RedirectResponse(f"{base}/settings?tab=integrations&error=notion_denied")
+
+    if not decoded:
+        return RedirectResponse(f"{base}/settings?tab=integrations&error=invalid_state")
+
+    user_id = decoded["user_id"]
+
+    credentials = base64.b64encode(f"{NOTION_CLIENT_ID}:{NOTION_CLIENT_SECRET}".encode()).decode()
+    token_res = requests.post(
+        _NOTION_TOKEN_URL,
+        headers={
+            "Authorization": f"Basic {credentials}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": f"{BACKEND_URL}/integrations/callback/notion",
+        },
+    )
+    if not token_res.ok:
+        return RedirectResponse(f"{base}/settings?tab=integrations&error=notion_token")
+
+    tokens = token_res.json()
+    access_token = tokens["access_token"]
+
+    owner = tokens.get("owner", {})
+    owner_user = owner.get("user", {})
+    email = owner_user.get("person", {}).get("email") or owner_user.get("name")
+    if not email:
+        email = tokens.get("workspace_name")
+
+    upsert_connected_account(
+        user_id=user_id, provider="notion",
+        access_token=access_token, refresh_token=None,
+        token_expiry=None, email=email,
+    )
+    return RedirectResponse(f"{base}/settings?tab=integrations&connected=notion")
+
+
+# ── HubSpot ───────────────────────────────────────────────────────────────────
+
+@router.get("/connect/hubspot")
+def connect_hubspot(origin: str = Query(default=""), user: User = Depends(get_current_user)):
+    state = _make_state(user.id, origin)
+    params = {
+        "client_id": HUBSPOT_CLIENT_ID,
+        "redirect_uri": f"{BACKEND_URL}/integrations/callback/hubspot",
+        "scope": "crm.objects.notes.write",
+        "state": state,
+    }
+    return {"url": f"{_HUBSPOT_AUTH_URL}?{urllib.parse.urlencode(params)}"}
+
+
+@router.get("/callback/hubspot")
+def callback_hubspot(code: str = None, state: str = None, error: str = None):
+    decoded = _decode_state(state) if state else None
+    base = (decoded or {}).get("origin") or FRONTEND_URL
+
+    if error or not code or not state:
+        return RedirectResponse(f"{base}/settings?tab=integrations&error=hubspot_denied")
+
+    if not decoded:
+        return RedirectResponse(f"{base}/settings?tab=integrations&error=invalid_state")
+
+    user_id = decoded["user_id"]
+
+    token_res = requests.post(
+        _HUBSPOT_TOKEN_URL,
+        data={
+            "grant_type": "authorization_code",
+            "client_id": HUBSPOT_CLIENT_ID,
+            "client_secret": HUBSPOT_CLIENT_SECRET,
+            "redirect_uri": f"{BACKEND_URL}/integrations/callback/hubspot",
+            "code": code,
+        },
+    )
+    if not token_res.ok:
+        return RedirectResponse(f"{base}/settings?tab=integrations&error=hubspot_token")
+
+    tokens = token_res.json()
+    access_token  = tokens["access_token"]
+    refresh_token = tokens.get("refresh_token")
+    expiry        = datetime.utcnow() + timedelta(seconds=tokens.get("expires_in", 3600))
+
+    email = None
+    info_res = requests.get(f"https://api.hubapi.com/oauth/v1/access-tokens/{access_token}")
+    if info_res.ok:
+        email = info_res.json().get("user")
+
+    upsert_connected_account(
+        user_id=user_id, provider="hubspot",
+        access_token=access_token, refresh_token=refresh_token,
+        token_expiry=expiry, email=email,
+    )
+    return RedirectResponse(f"{base}/settings?tab=integrations&connected=hubspot")
+
+
+# ── Linear ────────────────────────────────────────────────────────────────────
+
+@router.get("/connect/linear")
+def connect_linear(origin: str = Query(default=""), user: User = Depends(get_current_user)):
+    state = _make_state(user.id, origin)
+    params = {
+        "client_id": LINEAR_CLIENT_ID,
+        "redirect_uri": f"{BACKEND_URL}/integrations/callback/linear",
+        "response_type": "code",
+        "scope": "read,write",
+        "state": state,
+    }
+    return {"url": f"{_LINEAR_AUTH_URL}?{urllib.parse.urlencode(params)}"}
+
+
+@router.get("/callback/linear")
+def callback_linear(code: str = None, state: str = None, error: str = None):
+    decoded = _decode_state(state) if state else None
+    base = (decoded or {}).get("origin") or FRONTEND_URL
+
+    if error or not code or not state:
+        return RedirectResponse(f"{base}/settings?tab=integrations&error=linear_denied")
+
+    if not decoded:
+        return RedirectResponse(f"{base}/settings?tab=integrations&error=invalid_state")
+
+    user_id = decoded["user_id"]
+
+    token_res = requests.post(
+        _LINEAR_TOKEN_URL,
+        data={
+            "grant_type": "authorization_code",
+            "client_id": LINEAR_CLIENT_ID,
+            "client_secret": LINEAR_CLIENT_SECRET,
+            "redirect_uri": f"{BACKEND_URL}/integrations/callback/linear",
+            "code": code,
+        },
+    )
+    if not token_res.ok:
+        return RedirectResponse(f"{base}/settings?tab=integrations&error=linear_token")
+
+    tokens = token_res.json()
+    access_token  = tokens["access_token"]
+    expiry_secs   = tokens.get("expires_in")
+    expiry        = datetime.utcnow() + timedelta(seconds=expiry_secs) if expiry_secs else None
+
+    email = None
+    viewer_res = requests.post(
+        "https://api.linear.app/graphql",
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json",
+        },
+        json={"query": "{ viewer { id name email } }"},
+        timeout=10,
+    )
+    if viewer_res.ok:
+        viewer = viewer_res.json().get("data", {}).get("viewer", {})
+        email = viewer.get("email") or viewer.get("name")
+
+    # Fetch first team and store in settings
+    settings = {}
+    try:
+        from services.integrations.linear import list_teams
+        teams = list_teams(access_token)
+        if teams:
+            settings = {"team_id": teams[0]["id"], "team_name": teams[0]["name"]}
+    except Exception:
+        pass
+
+    upsert_connected_account(
+        user_id=user_id, provider="linear",
+        access_token=access_token, refresh_token=None,
+        token_expiry=expiry, email=email,
+        settings=settings,
+    )
+    return RedirectResponse(f"{base}/settings?tab=integrations&connected=linear")
+
+
+# ── Outlook (Microsoft) ───────────────────────────────────────────────────────
+
+@router.get("/connect/outlook")
+def connect_outlook(origin: str = Query(default=""), user: User = Depends(get_current_user)):
+    state = _make_state(user.id, origin)
+    params = {
+        "client_id": MICROSOFT_CLIENT_ID,
+        "redirect_uri": f"{BACKEND_URL}/integrations/callback/outlook",
+        "response_type": "code",
+        "scope": "User.Read Calendars.Read offline_access",
+        "state": state,
+    }
+    return {"url": f"{_MICROSOFT_AUTH_URL}?{urllib.parse.urlencode(params)}"}
+
+
+@router.get("/callback/outlook")
+def callback_outlook(code: str = None, state: str = None, error: str = None):
+    decoded = _decode_state(state) if state else None
+    base = (decoded or {}).get("origin") or FRONTEND_URL
+
+    if error or not code or not state:
+        return RedirectResponse(f"{base}/settings?tab=integrations&error=outlook_denied")
+
+    if not decoded:
+        return RedirectResponse(f"{base}/settings?tab=integrations&error=invalid_state")
+
+    user_id = decoded["user_id"]
+
+    token_res = requests.post(
+        _MICROSOFT_TOKEN_URL,
+        data={
+            "grant_type": "authorization_code",
+            "client_id": MICROSOFT_CLIENT_ID,
+            "client_secret": MICROSOFT_CLIENT_SECRET,
+            "redirect_uri": f"{BACKEND_URL}/integrations/callback/outlook",
+            "code": code,
+            "scope": "User.Read Calendars.Read offline_access",
+        },
+    )
+    if not token_res.ok:
+        return RedirectResponse(f"{base}/settings?tab=integrations&error=outlook_token")
+
+    tokens = token_res.json()
+    access_token  = tokens["access_token"]
+    refresh_token = tokens.get("refresh_token")
+    expiry        = datetime.utcnow() + timedelta(seconds=tokens.get("expires_in", 3600))
+
+    email = None
+    me_res = requests.get(
+        "https://graph.microsoft.com/v1.0/me",
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+    if me_res.ok:
+        me = me_res.json()
+        email = me.get("mail") or me.get("userPrincipalName")
+
+    upsert_connected_account(
+        user_id=user_id, provider="outlook",
+        access_token=access_token, refresh_token=refresh_token,
+        token_expiry=expiry, email=email,
+    )
+    return RedirectResponse(f"{base}/settings?tab=integrations&connected=outlook")
+
+
+# ── Webhook (no OAuth) ────────────────────────────────────────────────────────
+
+@router.post("/webhook/connect")
+def connect_webhook(body: WebhookConnectBody, user: User = Depends(get_current_user)):
+    upsert_connected_account(
+        user_id=user.id, provider="webhook",
+        access_token="", refresh_token=None,
+        token_expiry=None, email=None,
+        settings={"url": body.url},
+    )
+    return {"ok": True}
+
+
+# ── Settings ──────────────────────────────────────────────────────────────────
+
+@router.patch("/{provider}/settings")
+def update_settings(provider: str, body: IntegrationSettingsIn, user: User = Depends(get_current_user)):
+    updates = {k: v for k, v in body.dict().items() if v is not None}
+    if not updates:
+        raise HTTPException(400, "No settings provided")
+    account = update_integration_settings(user.id, provider, updates)
+    if not account:
+        raise HTTPException(404, "Integration not connected")
+    return {"ok": True, "settings": account.settings}
+
+
+@router.get("/{provider}/resources")
+def get_resources(provider: str, user: User = Depends(get_current_user)):
+    """Return available resources for config (channels, databases, teams)."""
+    account = get_connected_account(user.id, provider)
+    if not account:
+        raise HTTPException(404, "Not connected")
+    if provider == "notion":
+        import requests as _req
+        resp = _req.post(
+            "https://api.notion.com/v1/search",
+            headers={"Authorization": f"Bearer {account.access_token}", "Notion-Version": "2022-06-28"},
+            json={"filter": {"value": "database", "property": "object"}},
+            timeout=10,
+        )
+        dbs = [
+            {"id": d["id"], "name": d.get("title", [{}])[0].get("plain_text", "Untitled")}
+            for d in resp.json().get("results", [])
+            if resp.ok
+        ]
+        return {"resources": dbs}
+    elif provider == "linear":
+        from services.integrations.linear import list_teams
+        return {"resources": list_teams(account.access_token)}
+    elif provider == "google_drive":
+        from services.integrations.google_drive import list_folders
+        return {"resources": list_folders(account.access_token)}
+    return {"resources": []}
+
+
 # ── Calendar ──────────────────────────────────────────────────────────────────
 
 @router.get("/calendar/upcoming")
@@ -280,9 +704,15 @@ def get_upcoming_calendar_events(
 
 # ── Manage ────────────────────────────────────────────────────────────────────
 
+_ALL_PROVIDERS = {
+    "google", "zoom", "slack", "notion", "hubspot",
+    "linear", "outlook", "webhook", "google_drive",
+}
+
+
 @router.delete("/{provider}")
 def disconnect_integration(provider: str, user: User = Depends(get_current_user)):
-    if provider not in ("google", "zoom"):
+    if provider not in _ALL_PROVIDERS:
         raise HTTPException(status_code=400, detail="Unknown provider")
     delete_connected_account(user.id, provider)
     return {"ok": True}
@@ -290,7 +720,7 @@ def disconnect_integration(provider: str, user: User = Depends(get_current_user)
 
 @router.patch("/{provider}")
 def update_integration(provider: str, body: UpdateIntegrationBody, user: User = Depends(get_current_user)):
-    if provider not in ("google", "zoom"):
+    if provider not in _ALL_PROVIDERS:
         raise HTTPException(status_code=400, detail="Unknown provider")
     if body.auto_join is not None:
         account = update_auto_join(user.id, provider, body.auto_join)
