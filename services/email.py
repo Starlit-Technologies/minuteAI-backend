@@ -4,7 +4,8 @@ import resend
 resend.api_key = os.environ.get("RESEND_API_KEY", "")
 
 FROM_ADDRESS = os.environ.get("EMAIL_FROM", "MinuteAI <onboarding@resend.dev>")
-APP_URL = os.environ.get("APP_URL", "http://localhost:5174")
+APP_URL   = os.environ.get("APP_URL", "http://localhost:5173")
+ADMIN_URL = os.environ.get("ADMIN_URL", "http://localhost:5174")
 
 
 def send_minutes_ready(to_email: str, job_id: str, meeting_title: str):
@@ -85,7 +86,7 @@ def send_attendee_recap(
 def send_bot_auth_alert(to_emails: list[str], bot_email: str | None, error: str):
     if not resend.api_key:
         return
-    admin_url = f"{APP_URL.replace('5173', '5174').replace('5174', '5174')}/bot-config"
+    admin_url = f"{ADMIN_URL.rstrip('/')}/bot-config"
     bot_label = bot_email or "the bot account"
     resend.Emails.send({
         "from": FROM_ADDRESS,

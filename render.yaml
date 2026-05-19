@@ -44,6 +44,8 @@ services:
         value: groq
       - key: APP_URL
         value: https://minuteai-frontend.onrender.com
+      - key: ADMIN_URL
+        value: https://minuteai-admin.onrender.com
       - key: CORS_ORIGINS
         value: https://minuteai-frontend.onrender.com,https://minuteai-admin.onrender.com
 
