@@ -1,10 +1,15 @@
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import BaseModel
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from middleware.auth import get_admin_user, get_db
+from models.bot_config import (
+    cancel_setup, complete_setup, default_profile_dir,
+    load_bot_config, profile_status, save_bot_config, setup_running, start_setup,
+)
 from models.job import JobRecord
 from models.notification import NotificationRecord
 from models.task import TaskRecord
@@ -773,3 +778,107 @@ def admin_delete_plan(plan_id: str, db: Session = Depends(get_db), _: User = Dep
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Plan not found.")
     db.delete(plan)
     db.commit()
+
+
+# ── Bot Meeting Account ───────────────────────────────────────────────────────
+
+class BotConfigUpdateIn(BaseModel):
+    email:    Optional[str] = None
+    bot_name: Optional[str] = None
+
+
+def _bot_config_response(cfg: dict) -> dict:
+    ps = profile_status(cfg)
+    return {
+        "email":              cfg.get("email", ""),
+        "bot_name":           cfg.get("bot_name", "MinuteAI Recorder"),
+        "profile_dir":        ps["path"],
+        "profile_exists":     ps["exists"],
+        "profile_updated_at": ps["updated_at"],
+        "signed_in_email":    ps["signed_in_email"],
+        "signed_in_name":     ps["signed_in_name"],
+        "setup_running":      setup_running(),
+    }
+
+
+@router.get("/bot-config")
+def admin_get_bot_config(_: User = Depends(get_admin_user)):
+    return _bot_config_response(load_bot_config())
+
+
+@router.patch("/bot-config")
+def admin_update_bot_config(body: BotConfigUpdateIn, _: User = Depends(get_admin_user)):
+    updates = {}
+    if body.email is not None:
+        updates["email"] = body.email.strip()
+    if body.bot_name is not None:
+        updates["bot_name"] = body.bot_name.strip() or "MinuteAI Recorder"
+    cfg = save_bot_config(updates)
+    return _bot_config_response(cfg)
+
+
+@router.post("/bot-config/start-setup")
+def admin_start_bot_setup(_: User = Depends(get_admin_user)):
+    cfg = load_bot_config()
+    pdir = cfg.get("profile_dir") or default_profile_dir()
+    save_bot_config({"profile_dir": pdir})
+    pid = start_setup(pdir)
+    return {
+        "pid":         pid,
+        "profile_dir": pdir,
+        "message":     (
+            "A Chromium window has opened on the server machine. "
+            "Sign into your bot Google account, then click 'Complete Setup'."
+        ),
+    }
+
+
+@router.post("/bot-config/complete-setup")
+def admin_complete_bot_setup(_: User = Depends(get_admin_user)):
+    complete_setup()
+    cfg = load_bot_config()
+    ps  = profile_status(cfg)
+    if not ps["exists"]:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Profile directory is empty — make sure you signed into Google before clicking Complete.",
+        )
+    return _bot_config_response(cfg)
+
+
+@router.post("/bot-config/cancel-setup")
+def admin_cancel_bot_setup(_: User = Depends(get_admin_user)):
+    cancel_setup()
+    return _bot_config_response(load_bot_config())
+
+
+@router.delete("/bot-config/profile", status_code=200)
+def admin_clear_bot_profile(_: User = Depends(get_admin_user)):
+    import shutil
+    cancel_setup()
+    cfg = load_bot_config()
+    pdir = cfg.get("profile_dir", "")
+    if pdir:
+        shutil.rmtree(pdir, ignore_errors=True)
+    return _bot_config_response(load_bot_config())
+
+
+@router.post("/bot-config/reauth")
+def admin_reauth_bot(_: User = Depends(get_admin_user)):
+    """Sign out (clear profile) and immediately open a fresh login browser window."""
+    import shutil
+    cancel_setup()
+    cfg = load_bot_config()
+    pdir = cfg.get("profile_dir") or default_profile_dir()
+    if pdir:
+        shutil.rmtree(pdir, ignore_errors=True)
+    save_bot_config({"profile_dir": pdir})
+    pid = start_setup(pdir)
+    return {
+        "pid":         pid,
+        "profile_dir": pdir,
+        "message":     (
+            "Previous session cleared. A new Chromium window has opened on the server machine. "
+            "Sign into your bot Google account, then click 'Complete Setup'."
+        ),
+    }

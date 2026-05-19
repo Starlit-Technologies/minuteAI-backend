@@ -27,12 +27,14 @@ from api.routes.translate import router as translate_router
 from api.routes.integrations import router as integrations_router
 from api.routes.ws_live_translate import router as ws_live_translate_router
 from api.routes.steph import router as steph_router
+from api.routes.ws_live_transcript import router as ws_live_transcript_router
+from api.routes.ai_live import router as ai_live_router
 
 from models.job import store
 from db.init_db import create_tables, run_migrations, recover_stuck_jobs, recover_stuck_bot_sessions, seed_default_workspaces
 from models.bot_account import ensure_bot_accounts_for_all_workspaces
 from models.meeting_bot import recover_processing_sessions
-from services.meeting_bots.runner import start_pending_meeting_bot_sessions
+from services.meeting_bots.runner import start_pending_meeting_bot_sessions, start_bot_session_poll_loop
 from services.meeting_bots.calendar_sync import start_calendar_sync_loop
 from services.user_calendar_sync import start_user_calendar_sync_loop
 
@@ -87,6 +89,8 @@ app.include_router(status_router)
 app.include_router(results_router)
 app.include_router(download_router)
 app.include_router(ws_router)
+app.include_router(ws_live_transcript_router)
+app.include_router(ai_live_router)
 
 
 @app.on_event("startup")
@@ -104,6 +108,7 @@ async def startup():
     manager.set_loop(asyncio.get_event_loop())
     store.set_notify(manager.notify)
     start_pending_meeting_bot_sessions()
+    start_bot_session_poll_loop()
     start_calendar_sync_loop()
     start_user_calendar_sync_loop()
 

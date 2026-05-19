@@ -30,9 +30,10 @@ BACKEND_URL          = os.environ.get("BACKEND_URL", "http://localhost:8000")
 FRONTEND_URL         = os.environ.get("APP_URL", "http://localhost:5173")
 JWT_SECRET           = os.environ.get("JWT_SECRET", "dev_secret")
 
-_GOOGLE_AUTH_URL  = "https://accounts.google.com/o/oauth2/v2/auth"
-_GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
-_GOOGLE_SCOPES    = "openid email https://www.googleapis.com/auth/calendar.readonly"
+_GOOGLE_AUTH_URL      = "https://accounts.google.com/o/oauth2/v2/auth"
+_GOOGLE_TOKEN_URL     = "https://oauth2.googleapis.com/token"
+_GOOGLE_CALENDAR_URL  = "https://www.googleapis.com/calendar/v3/calendars/primary/events"
+_GOOGLE_SCOPES        = "openid email https://www.googleapis.com/auth/calendar.readonly"
 
 _ZOOM_AUTH_URL  = "https://zoom.us/oauth/authorize"
 _ZOOM_TOKEN_URL = "https://zoom.us/oauth/token"
@@ -185,6 +186,96 @@ def callback_zoom(code: str = None, state: str = None, error: str = None):
         token_expiry=expiry, email=email,
     )
     return RedirectResponse(f"{base}/settings?tab=integrations&connected=zoom")
+
+
+# ── Calendar ──────────────────────────────────────────────────────────────────
+
+@router.get("/calendar/upcoming")
+def get_upcoming_calendar_events(
+    days: int = Query(default=7, ge=1, le=14),
+    user: User = Depends(get_current_user),
+):
+    from models.meeting_bot import get_session_by_user_event
+
+    account = get_connected_account(user.id, "google")
+    if not account:
+        return {"events": [], "connected": False, "auto_join": True}
+
+    access_token = account.access_token
+
+    # Refresh if token is within 5 minutes of expiry
+    if account.token_expiry and (account.token_expiry - datetime.utcnow()).total_seconds() < 300:
+        if account.refresh_token:
+            r = requests.post(_GOOGLE_TOKEN_URL, data={
+                "client_id": GOOGLE_CLIENT_ID,
+                "client_secret": GOOGLE_CLIENT_SECRET,
+                "refresh_token": account.refresh_token,
+                "grant_type": "refresh_token",
+            })
+            if r.ok:
+                td = r.json()
+                access_token = td["access_token"]
+                expiry = datetime.utcnow() + timedelta(seconds=td.get("expires_in", 3600))
+                upsert_connected_account(
+                    user_id=user.id, provider="google",
+                    access_token=access_token, refresh_token=account.refresh_token,
+                    token_expiry=expiry, email=account.email,
+                )
+
+    now = datetime.utcnow()
+    time_min = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    time_max = (now + timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    cal_res = requests.get(
+        _GOOGLE_CALENDAR_URL,
+        headers={"Authorization": f"Bearer {access_token}"},
+        params={
+            "timeMin": time_min,
+            "timeMax": time_max,
+            "singleEvents": "true",
+            "orderBy": "startTime",
+            "maxResults": 20,
+        },
+    )
+    if not cal_res.ok:
+        return {"events": [], "connected": True, "auto_join": account.auto_join}
+
+    items = cal_res.json().get("items", [])
+    events = []
+    for item in items:
+        meet_url = None
+        if item.get("hangoutLink"):
+            meet_url = item["hangoutLink"]
+        elif item.get("conferenceData"):
+            for ep in item["conferenceData"].get("entryPoints", []):
+                if ep.get("entryPointType") == "video":
+                    meet_url = ep.get("uri")
+                    break
+
+        if not meet_url:
+            continue
+
+        event_id = item["id"]
+        start_raw = item.get("start", {})
+        start_str = start_raw.get("dateTime") or start_raw.get("date", "")
+
+        session = get_session_by_user_event(user.id, event_id)
+        recording_status = session.status if session else None
+
+        attendees = [
+            a.get("email", "") for a in item.get("attendees", []) if not a.get("self")
+        ]
+
+        events.append({
+            "id": event_id,
+            "title": item.get("summary", "Untitled Meeting"),
+            "start": start_str,
+            "meet_url": meet_url,
+            "recording_status": recording_status,
+            "attendees": attendees,
+        })
+
+    return {"events": events, "connected": True, "auto_join": account.auto_join}
 
 
 # ── Manage ────────────────────────────────────────────────────────────────────

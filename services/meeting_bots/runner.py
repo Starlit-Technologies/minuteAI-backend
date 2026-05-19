@@ -36,6 +36,20 @@ CAPTURE_DIR = Path(__file__).parent.parent.parent / "storage" / "meeting_bot_cap
 # None is the sentinel that ends the stream.
 _live_audio_queues: dict[str, asyncio.Queue] = {}
 
+# ── Stop-signal set ───────────────────────────────────────────────────────────
+# The /end API route adds a session_id here so the recording loop wakes up
+# immediately instead of waiting for the next 1-second DB poll.
+_stop_requested: set[str] = set()
+
+# Track sessions that have an active thread so we never double-launch.
+_running_sessions: set[str] = set()
+_running_lock = threading.Lock()
+
+
+def signal_stop(session_id: str) -> None:
+    """Called by the /end route to make the recording loop exit immediately."""
+    _stop_requested.add(session_id)
+
 
 def register_bot_audio_listener(session_id: str) -> asyncio.Queue:
     q: asyncio.Queue = asyncio.Queue(maxsize=500)
@@ -57,6 +71,10 @@ GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "")
 MEETING_BOT_MODE            = os.environ.get("MEETING_BOT_MODE", "playwright").strip().lower()
 MEETING_BOT_RECORDER_NAME   = os.environ.get("MEETING_BOT_RECORDER_NAME", "MinuteAI Recorder").strip() or "MinuteAI Recorder"
 MEETING_BOT_RECORD_SECONDS  = int(os.environ.get("MEETING_BOT_RECORD_SECONDS", "1800"))
+
+# Env-var fallbacks — overridden at runtime by bot_config.json (set via admin panel).
+MEETING_BOT_PROFILE_DIR = os.environ.get("MEETING_BOT_PROFILE_DIR", "").strip()
+BOT_EMAIL               = os.environ.get("BOT_EMAIL", "").strip()
 FFMPEG = imageio_ffmpeg.get_ffmpeg_exe()
 
 GOOGLE_MEET_BLOCK_MESSAGES = [
@@ -233,6 +251,7 @@ class BotRunContext:
     meeting_url: str
     bot_name: str
     platform: str
+    source: str = ""   # "user_calendar", "manual", etc.
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -357,6 +376,36 @@ async def _dismiss_google_meet_prejoin(page):
         await page.wait_for_timeout(400)
 
 
+async def _dismiss_google_account_picker(page, session_id: str):
+    """
+    Dismiss 'Choose an account' or 'Continue as X' prompts that appear when the
+    persistent profile has multiple Google accounts or the URL contains ?authuser=N.
+    """
+    # "Choose an account" list — click the first account entry
+    for selector in [
+        "li[data-identifier]",
+        "div[data-authuser]",
+        "div[jsname='ik5nac']",  # account row in newer chooser UI
+    ]:
+        with suppress(Exception):
+            el = page.locator(selector).first
+            if await el.is_visible(timeout=1500):
+                _log(session_id, f"Account picker detected ({selector}) — clicking first account")
+                await el.click(timeout=2000)
+                await page.wait_for_timeout(2500)
+                return
+
+    # Single-account "Continue as [name]" button
+    for label in ["Continue", "Use this account", "Confirm"]:
+        with suppress(Exception):
+            btn = page.get_by_role("button", name=label, exact=False).first
+            if await btn.is_visible(timeout=1000):
+                _log(session_id, f"Account chooser: clicking '{label}'")
+                await btn.click(timeout=2000)
+                await page.wait_for_timeout(2000)
+                return
+
+
 async def _maybe_turn_off_google_meet_av(page):
     for label in [
         "Turn off microphone", "Turn off camera", "Mute microphone",
@@ -409,64 +458,152 @@ _FILL_NAME_JS = """
 }
 """
 
+# Scans ALL buttons/role=button elements for any "join"-related text and clicks the first match.
+# Used as the last-resort fallback when Playwright locators miss the button.
+_CLICK_JOIN_BUTTON_JS = """
+() => {
+    const exact = /^(ask to join|join now|request to join|join meeting|join)$/i;
+    const loose = /join/i;
+    for (const pass of [exact, loose]) {
+        for (const el of document.querySelectorAll('button, [role="button"]')) {
+            const text  = (el.textContent || '').replace(/\\s+/g, ' ').trim();
+            const label = (el.getAttribute('aria-label') || '').trim();
+            if (pass.test(text) || pass.test(label)) {
+                const r = el.getBoundingClientRect();
+                if (r.width > 20 && r.height > 10) {
+                    el.click();
+                    return text || label;
+                }
+            }
+        }
+    }
+    return null;
+}
+"""
+
 
 async def _sign_in_google_meet(page, user_id: str, session_id: str) -> bool:
     """
-    Uses the user's stored Google OAuth token to sign the browser into Google
-    before joining Meet. Works on any deployment — no persistent profile needed.
-    Returns True if sign-in succeeded.
+    Converts the user's stored Google OAuth access token into a browser session
+    so Meet sees an authenticated user. Tries MergeSession first, falls back to
+    OAuthLogin, then verifies the result by navigating to myaccount.google.com.
+    Returns True only when sign-in is actually confirmed.
     """
     import requests as _req
-    from datetime import timezone
     from models.connected_account import get_connected_account
 
     if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
+        _log(session_id, "Google sign-in skipped — no OAuth client credentials configured")
         return False
 
     account = get_connected_account(user_id, "google")
     if not account or not account.refresh_token:
+        _log(session_id, "Google sign-in skipped — no connected Google account for this user")
         return False
 
-    # Refresh the access token so we always have a valid one
+    # Refresh to get a fresh access token
     try:
         resp = _req.post("https://oauth2.googleapis.com/token", data={
-            "client_id": GOOGLE_CLIENT_ID,
+            "client_id":     GOOGLE_CLIENT_ID,
             "client_secret": GOOGLE_CLIENT_SECRET,
             "refresh_token": account.refresh_token,
-            "grant_type": "refresh_token",
+            "grant_type":    "refresh_token",
         }, timeout=15)
         if not resp.ok:
+            _log(session_id, f"Google token refresh failed: HTTP {resp.status_code}")
             return False
         access_token = resp.json().get("access_token")
         if not access_token:
+            _log(session_id, "Google token refresh returned no access_token")
             return False
-    except Exception:
+    except Exception as exc:
+        _log(session_id, f"Google token refresh error: {exc}")
         return False
 
-    # Exchange the OAuth access token for a Google browser session
-    try:
-        login_url = (
+    # Try multiple sign-in endpoints; stop at the first one that verifies
+    candidates = [
+        (
+            "MergeSession",
+            f"https://accounts.google.com/MergeSession"
+            f"?service=mail&continue=https://myaccount.google.com"
+            f"&token={access_token}&source=googletalkplugin"
+        ),
+        (
+            "OAuthLogin",
             f"https://accounts.google.com/OAuthLogin"
             f"?source=ogb&issuedTo={GOOGLE_CLIENT_ID}&token={access_token}"
-        )
-        await page.goto(login_url, wait_until="domcontentloaded", timeout=20000)
-        await page.wait_for_timeout(2000)
-        title = await page.title()
-        signed_in = "accounts.google.com" not in page.url or "myaccount" in page.url or "google.com" in page.url
-        _log(session_id, f"Google sign-in via OAuth — page: {title!r} signed_in={signed_in}")
-        return True
-    except Exception as exc:
-        _log(session_id, f"Google OAuth sign-in failed (non-fatal): {exc}")
-        return False
+        ),
+    ]
+
+    async def _is_signed_in_now() -> bool:
+        """Check for actual Google session cookies — more reliable than URL inspection."""
+        try:
+            cookies = await page.context.cookies(urls=["https://accounts.google.com", "https://google.com"])
+            return any(c["name"] in {"SID", "__Secure-3PSID", "HSID", "SSID"} for c in cookies)
+        except Exception:
+            return False
+
+    for method, sign_in_url in candidates:
+        try:
+            await page.goto(sign_in_url, wait_until="domcontentloaded", timeout=20000)
+            await page.wait_for_timeout(2000)
+            _log(session_id, f"[{method}] landed — title: {await page.title()!r} url: {page.url!r}")
+
+            # Primary verification: check for Google session cookies
+            if await _is_signed_in_now():
+                _log(session_id, f"Google sign-in confirmed via {method} (cookie check)")
+                return True
+
+            # Fallback verification: navigate to myaccount and check URL
+            await page.goto("https://myaccount.google.com", wait_until="domcontentloaded", timeout=15000)
+            await page.wait_for_timeout(1500)
+            final_url = page.url
+            _log(session_id, f"[{method}] myaccount URL: {final_url!r}")
+
+            if "myaccount.google.com" in final_url and "signin" not in final_url:
+                _log(session_id, f"Google sign-in confirmed via {method} (myaccount check)")
+                return True
+
+            _log(session_id, f"[{method}] sign-in not confirmed")
+        except Exception as exc:
+            _log(session_id, f"[{method}] attempt raised: {exc}")
+
+    _log(session_id, "All Google sign-in methods failed — joining as guest")
+    return False
 
 
-async def _prepare_google_meet(page, meeting_url: str, bot_name: str, session_id: str):
+async def _prepare_google_meet(page, meeting_url: str, bot_name: str, session_id: str, is_signed_in: bool = False, sign_in_ok: bool = False):
     await page.goto(meeting_url, wait_until="domcontentloaded", timeout=60000)
-    await page.wait_for_timeout(5000)
+    # Signed-in lobbies take a bit longer to render the join button
+    await page.wait_for_timeout(6000 if is_signed_in else 5000)
     _log(session_id, f"Google Meet page loaded — title: {await page.title()} url: {page.url}")
+
+    # Handle account picker before anything else (appears with persistent profiles / ?authuser=N URLs)
+    await _dismiss_google_account_picker(page, session_id)
     await _dismiss_google_meet_prejoin(page)
     await _maybe_turn_off_google_meet_av(page)
     await page.wait_for_timeout(1500)
+
+    # Check for access block before spending more time
+    blocked = await _detect_google_meet_block(page)
+    if blocked:
+        if sign_in_ok:
+            hint = (
+                "The bot signed in with your Google account but was still blocked — "
+                "this meeting is restricted to specific accounts (e.g. a different org). "
+                "Ask the meeting host to allow external participants."
+            )
+        else:
+            hint = (
+                "The bot could not sign in with your Google account and was blocked as a guest. "
+                "Fix: go to Settings → Meeting Bot and re-run the bot setup, signing in with "
+                "the Google account that has access to these meetings."
+            )
+        raise RuntimeError(f"Google Meet blocked the bot: '{blocked}'. {hint}")
+
+    # Always attempt name fill — if the profile is genuinely signed in there will be no
+    # input field and this silently no-ops. If the profile session expired and the page
+    # fell back to guest mode the name MUST be filled or the join button stays disabled.
 
     # Primary: JavaScript fill (works regardless of Playwright visibility detection)
     with suppress(Exception):
@@ -497,44 +634,63 @@ async def _prepare_google_meet(page, meeting_url: str, bot_name: str, session_id
                 _log(session_id, f"Filled guest name using selector: {selector}")
                 return
 
-    _log(session_id, "Warning: could not find name input — page may require sign-in")
+    if is_signed_in:
+        _log(session_id, "No name input found — profile is signed in, proceeding to join button")
+    else:
+        _log(session_id, "Warning: could not find name input")
 
 
 async def _join_google_meet(page, session_id: str):
-    # Extra wait so Google Meet finishes enabling the join button after name fill
-    await page.wait_for_timeout(2000)
+    # Re-check for block — could have appeared after the page settled
+    blocked = await _detect_google_meet_block(page)
+    if blocked:
+        raise RuntimeError(
+            f"Google Meet blocked the bot: '{blocked}'. "
+            "The meeting is restricted. Ask the host to invite the bot account or allow external participants."
+        )
+
+    # Wait up to 15 s for any known join button to appear in the DOM before trying to click.
+    # This is critical for signed-in flow where the lobby renders the button after the
+    # camera/mic preview loads — fixed sleeps miss it when the network is slow.
+    _JOIN_BUTTON_CSS = (
+        "button[jsname='w5gBed'], "   # "Ask to join"  (current Meet lobby)
+        "button[jsname='d8E3Dd'], "   # "Join now"     (older variant)
+        "button[jsname='V5AQZE'], "   # legacy join button
+        "button[aria-label*='join' i]"
+    )
+    with suppress(Exception):
+        await page.wait_for_selector(_JOIN_BUTTON_CSS, state="visible", timeout=15000)
+        _log(session_id, "Join button visible in DOM")
+
+    await page.wait_for_timeout(800)  # brief settle after button appears
 
     async def _try_click(btn) -> bool:
-        """Click btn if visible; use JS-click if disabled (name-fill may not re-enable via Playwright)."""
+        """Click btn if visible; use JS-click if disabled."""
         if not await btn.is_visible(timeout=2000):
             return False
         enabled = await btn.is_enabled(timeout=500)
         if enabled:
             await btn.click(timeout=3000)
         else:
-            # Attempt JS click — Google Meet sometimes responds even to programmatic clicks
             await btn.evaluate("el => el.click()")
         _status(session_id, "joining")
         return True
 
-    # Role-based (most reliable when text is stable)
+    # 1. Role-based (most reliable when text is stable)
     for label in ["Ask to join", "Join now", "Request to join", "Join meeting", "Join"]:
         with suppress(Exception):
             btn = page.get_by_role("button", name=label, exact=False).first
             if await _try_click(btn):
                 return
 
-    # jsname fallbacks — only real button jsnames, NOT container divs.
-    # w5gBed  = "Ask to join" button (confirmed from live Meet lobby HTML)
-    # d8E3Dd  = older "Join now" button seen in some Meet variants
-    # V5AQZE  = legacy join button
+    # 2. jsname selectors
     for jsname in ["w5gBed", "d8E3Dd", "V5AQZE"]:
         with suppress(Exception):
             btn = page.locator(f"button[jsname='{jsname}']").first
             if await _try_click(btn):
                 return
 
-    # Walk all buttons whose text contains "join"
+    # 3. Walk all buttons whose text contains "join"
     with suppress(Exception):
         btns = page.locator("button").filter(has_text=re.compile(r"join", re.IGNORECASE))
         count = await btns.count()
@@ -542,6 +698,14 @@ async def _join_google_meet(page, session_id: str):
             btn = btns.nth(i)
             if await _try_click(btn):
                 return
+
+    # 4. JS full-page scan — catches buttons that Playwright locators miss in headless mode
+    with suppress(Exception):
+        clicked_text = await page.evaluate(_CLICK_JOIN_BUTTON_JS)
+        if clicked_text:
+            _log(session_id, f"Joined via JS scan (button text: '{clicked_text}')")
+            _status(session_id, "joining")
+            return
 
     title = await page.title()
     raise RuntimeError(f"Could not find the Google Meet join button. Page title: '{title}' url: {page.url}")
@@ -767,8 +931,10 @@ async def _prepare_and_join_zoom(page, meeting_url: str, bot_name: str, session_
 
 # ── Shared wait/detection ─────────────────────────────────────────────────────
 
-async def _wait_for_admission(page, session_id: str, platform: str) -> bool:
-    _status(session_id, "waiting_for_host")
+async def _wait_for_admission(page, session_id: str, platform: str,
+                              sign_in_attempted: bool = False, sign_in_ok: bool = False) -> bool:
+    if _current_status(session_id) not in {"cancelled", "failed"}:
+        _status(session_id, "waiting_for_host")
     # Zoom needs a longer window: the "Joining Meeting..." spinner can run for
     # 30–60 s before the in-meeting UI appears on the headless browser.
     deadline_seconds = 90 if platform == "google_meet" else 120
@@ -780,10 +946,24 @@ async def _wait_for_admission(page, session_id: str, platform: str) -> bool:
         if platform == "google_meet":
             blocked = await _detect_google_meet_block(page)
             if blocked:
+                if sign_in_attempted and not sign_in_ok:
+                    hint = (
+                        "Your connected Google account session could not be established. "
+                        "Try reconnecting it in Settings → Integrations, then start the bot again."
+                    )
+                elif not sign_in_attempted:
+                    hint = (
+                        "Connect your Google account in Settings → Integrations so the bot can join as you."
+                    )
+                else:
+                    # signed in successfully but still blocked — meeting may restrict to org accounts
+                    hint = (
+                        "Even with your Google account, this meeting restricts access to specific accounts. "
+                        "Ask the host to allow external participants, or share the meeting link with guest access."
+                    )
                 raise RuntimeError(
                     f"Google Meet blocked the bot: {blocked}. "
-                    "The meeting is restricted to signed-in accounts. "
-                    "Connect your Google account in Settings → Integrations so the bot can join as you."
+                    f"The meeting is restricted to signed-in accounts. {hint}"
                 )
             signals = [
                 page.get_by_role("button", name="Leave call"),
@@ -840,12 +1020,16 @@ async def _is_still_in_meeting(page, platform: str) -> bool:
 async def _wait_for_recording_completion(page, session_id: str, platform: str):
     deadline = asyncio.get_running_loop().time() + MEETING_BOT_RECORD_SECONDS
     while asyncio.get_running_loop().time() < deadline:
+        # Check in-memory stop signal first (set by /end route immediately).
+        if session_id in _stop_requested:
+            _stop_requested.discard(session_id)
+            return
         if _current_status(session_id) in {"cancelled", "processing"}:
             return
         if not await _is_still_in_meeting(page, platform):
             _status(session_id, "processing")
             return
-        await page.wait_for_timeout(5000)
+        await page.wait_for_timeout(1000)
     _status(session_id, "processing")
 
 
@@ -858,6 +1042,108 @@ async def _leave_meeting(page, platform: str):
                 await button.click(timeout=2000)
                 await page.wait_for_timeout(1500)
                 return
+
+
+# ── Join announcement chat message ────────────────────────────────────────────
+
+_JOIN_MESSAGE = (
+    "👋 MinuteAI is here to record & take notes.\n"
+    "Type '/ff pause' to pause or '/ff stop' to stop recording.\n"
+    "Minutes will be available after the call."
+)
+
+async def _send_google_meet_chat(page, message: str, session_id: str):
+    """Open the chat panel and post a message. Silently skips on any error."""
+    try:
+        # Hover over the page to reveal the auto-hiding toolbar
+        await page.mouse.move(720, 450)
+        await page.wait_for_timeout(800)
+
+        # Open chat panel — aria-label varies across Meet versions
+        chat_opened = False
+        for label in [
+            "Chat with everyone", "In-call messages", "Chat", "Messages",
+            "Open chat", "Chat and captions",
+        ]:
+            with suppress(Exception):
+                btn = page.get_by_role("button", name=label, exact=False).first
+                if await btn.is_visible(timeout=1500):
+                    await btn.click(timeout=2000)
+                    await page.wait_for_timeout(1500)
+                    chat_opened = True
+                    _log(session_id, f"Opened chat panel via '{label}' button")
+                    break
+
+        # JS fallback: scan all buttons for anything chat-related
+        if not chat_opened:
+            with suppress(Exception):
+                clicked = await page.evaluate("""
+                    () => {
+                        const re = /chat|messages|in-call/i;
+                        for (const el of document.querySelectorAll('button, [role="button"]')) {
+                            const s = (el.getAttribute('aria-label') || el.textContent || '').trim();
+                            if (re.test(s)) { el.click(); return s; }
+                        }
+                        return null;
+                    }
+                """)
+                if clicked:
+                    _log(session_id, f"Opened chat via JS scan ('{clicked}')")
+                    await page.wait_for_timeout(1500)
+                    chat_opened = True
+
+        if not chat_opened:
+            _log(session_id, "Chat panel button not found — skipping join announcement")
+            return
+
+        # Find the chat input (textarea or contenteditable div)
+        chat_input = None
+        for selector in [
+            'textarea[aria-label*="message" i]',
+            'textarea[placeholder*="message" i]',
+            'div[contenteditable="true"][aria-label*="message" i]',
+            'div[contenteditable="true"][aria-label*="chat" i]',
+            'div[contenteditable="true"]',
+        ]:
+            with suppress(Exception):
+                el = page.locator(selector).last
+                if await el.is_visible(timeout=2000):
+                    chat_input = el
+                    break
+
+        if not chat_input:
+            _log(session_id, "Chat input not found — skipping join announcement")
+            return
+
+        await chat_input.click()
+        await page.wait_for_timeout(400)
+
+        # Use keyboard.type() — fill() doesn't work on contenteditable divs.
+        # Replace \n with Shift+Enter so newlines don't prematurely send the message.
+        lines = message.split("\n")
+        for i, line in enumerate(lines):
+            await page.keyboard.type(line)
+            if i < len(lines) - 1:
+                await page.keyboard.press("Shift+Enter")
+
+        await page.wait_for_timeout(400)
+
+        # Try an explicit send button first, fall back to Enter
+        sent = False
+        for send_label in ["Send message", "Send", "Submit"]:
+            with suppress(Exception):
+                send_btn = page.get_by_role("button", name=send_label, exact=False).first
+                if await send_btn.is_visible(timeout=800):
+                    await send_btn.click(timeout=2000)
+                    sent = True
+                    break
+        if not sent:
+            await page.keyboard.press("Enter")
+
+        await page.wait_for_timeout(600)
+        _log(session_id, "Join announcement sent to chat")
+    except Exception as exc:
+        _log(session_id, f"Chat announcement skipped: {exc}")
 
 
 # ── Main Playwright session ───────────────────────────────────────────────────
@@ -880,6 +1166,13 @@ async def _run_playwright_session(ctx: BotRunContext):
 
     CAPTURE_DIR.mkdir(parents=True, exist_ok=True)
 
+    # Load runtime bot config (admin panel may have updated it since startup).
+    from models.bot_config import load_bot_config as _load_bot_config
+    _bcfg = _load_bot_config()
+    _bot_profile_dir = _bcfg.get("profile_dir") or MEETING_BOT_PROFILE_DIR
+    _bot_email       = _bcfg.get("email")       or BOT_EMAIL
+    _bot_name_cfg    = _bcfg.get("bot_name")    or ctx.bot_name
+
     chromium_args = [
         "--use-fake-ui-for-media-stream",
         "--use-fake-device-for-media-stream",
@@ -900,8 +1193,11 @@ async def _run_playwright_session(ctx: BotRunContext):
             page    = None
 
             try:
-                browser = await pw.chromium.launch(headless=True, args=chromium_args)
-                context = await browser.new_context(
+                # Use a persistent Chromium profile (pre-signed-in bot account) when configured.
+                # This is the Fireflies-style approach: Meet sees a real Google user, not a guest.
+                bot_profile = _bot_profile_dir if _bot_profile_dir and Path(_bot_profile_dir).is_dir() else None
+
+                shared_context_kwargs = dict(
                     viewport={"width": 1440, "height": 900},
                     permissions=["camera", "microphone"],
                     ignore_https_errors=True,
@@ -910,6 +1206,20 @@ async def _run_playwright_session(ctx: BotRunContext):
                     timezone_id="America/New_York",
                 )
 
+                if bot_profile and ctx.platform == "google_meet":
+                    # launch_persistent_context owns the browser — no separate browser.close() needed.
+                    browser = None
+                    context = await pw.chromium.launch_persistent_context(
+                        user_data_dir=bot_profile,
+                        headless=True,
+                        args=chromium_args,
+                        **shared_context_kwargs,
+                    )
+                    _log(ctx.session_id, f"Launched with bot profile from {bot_profile}")
+                else:
+                    browser = await pw.chromium.launch(headless=True, args=chromium_args)
+                    context = await browser.new_context(**shared_context_kwargs)
+
                 await context.add_init_script(_ANTIDETECT_SCRIPT)
                 await context.add_init_script(_AUDIO_CAPTURE_SCRIPT)
                 _log(ctx.session_id, "Anti-detect + audio capture scripts registered")
@@ -917,11 +1227,29 @@ async def _run_playwright_session(ctx: BotRunContext):
                 page = await context.new_page()
                 await _take_debug_screenshot(page, ctx.session_id, "landing")
 
+                sign_in_attempted = False
+                sign_in_ok        = False
+
                 if ctx.platform == "google_meet":
-                    signed_in = await _sign_in_google_meet(page, ctx.user_id, ctx.session_id)
-                    if signed_in:
-                        _log(ctx.session_id, "Signed into Google — joining as authenticated user")
-                    await _prepare_google_meet(page, ctx.meeting_url, ctx.bot_name, ctx.session_id)
+                    # For meetings sourced from the user's own calendar, sign in as THAT USER
+                    # so the bot can access org/workspace-restricted meetings without needing
+                    # a separate invitation for the bot account.
+                    use_user_oauth = ctx.source == "user_calendar"
+
+                    if bot_profile and not use_user_oauth:
+                        # Manual sessions: use the pre-signed-in bot profile
+                        sign_in_attempted = True
+                        sign_in_ok        = True
+                        _log(ctx.session_id, f"Joining as bot account ({_bot_email or 'bot'}) via persistent profile")
+                    else:
+                        # User-calendar sessions (or no bot profile): sign in as the user
+                        sign_in_attempted = True
+                        sign_in_ok = await _sign_in_google_meet(page, ctx.user_id, ctx.session_id)
+                        if sign_in_ok:
+                            _log(ctx.session_id, "Signed into Google via user OAuth — joining as meeting owner")
+                        else:
+                            _log(ctx.session_id, "Joining Google Meet as guest (OAuth sign-in unavailable or failed)")
+                    await _prepare_google_meet(page, ctx.meeting_url, ctx.bot_name, ctx.session_id, is_signed_in=sign_in_ok, sign_in_ok=sign_in_ok)
                     await _take_debug_screenshot(page, ctx.session_id, "prejoin")
                     await _join_google_meet(page, ctx.session_id)
                 elif ctx.platform == "zoom":
@@ -930,20 +1258,28 @@ async def _run_playwright_session(ctx: BotRunContext):
                 else:
                     raise RuntimeError(f"Unsupported platform: {ctx.platform}")
 
-                joined = await _wait_for_admission(page, ctx.session_id, ctx.platform)
+                joined = await _wait_for_admission(
+                    page, ctx.session_id, ctx.platform,
+                    sign_in_attempted=sign_in_attempted, sign_in_ok=sign_in_ok,
+                )
                 screenshot_path = await _take_debug_screenshot(page, ctx.session_id, "postjoin")
 
                 if not joined:
-                    _failure(
-                        ctx.session_id,
-                        "Bot was not admitted to the meeting within the timeout. "
-                        "The host needs to accept 'MinuteAI Recorder' from the waiting room. "
-                        f"Debug screenshot: {screenshot_path}",
-                        recording_path=screenshot_path,
-                    )
+                    # Don't overwrite a "cancelled" status with a misleading admission error.
+                    if _current_status(ctx.session_id) not in {"cancelled", "failed"}:
+                        _failure(
+                            ctx.session_id,
+                            "Bot was not admitted to the meeting within the timeout. "
+                            "The host needs to accept 'MinuteAI Recorder' from the waiting room. "
+                            f"Debug screenshot: {screenshot_path}",
+                            recording_path=screenshot_path,
+                        )
                     return
 
                 _log(ctx.session_id, "Admitted — audio capture active")
+
+                if ctx.platform == "google_meet":
+                    await _send_google_meet_chat(page, _JOIN_MESSAGE, ctx.session_id)
 
                 drain_task     = asyncio.create_task(_drain_audio_chunks(page, audio_chunks, ctx.session_id))
                 pcm_drain_task = asyncio.create_task(_drain_pcm_for_live_translate(page, ctx.session_id))
@@ -956,14 +1292,20 @@ async def _run_playwright_session(ctx: BotRunContext):
                 _failure(ctx.session_id, f"Browser automation error: {exc}", recording_path=screenshot_path)
 
             finally:
+                # asyncio.CancelledError is a BaseException (Python 3.8+), not Exception,
+                # so suppress(Exception) would NOT catch it — use explicit try/except.
                 if drain_task and not drain_task.done():
                     drain_task.cancel()
-                    with suppress(Exception):
+                    try:
                         await drain_task
+                    except BaseException:
+                        pass
                 if pcm_drain_task and not pcm_drain_task.done():
                     pcm_drain_task.cancel()
-                    with suppress(Exception):
+                    try:
                         await pcm_drain_task
+                    except BaseException:
+                        pass
                 unregister_bot_audio_listener(ctx.session_id)
 
                 with suppress(Exception):
@@ -1030,6 +1372,12 @@ async def _run_playwright_session(ctx: BotRunContext):
 
     except Exception as exc:
         _failure(ctx.session_id, f"Session failed before launch: {exc}")
+    except BaseException as exc:
+        # Catch CancelledError and other BaseException subclasses that escape the inner handlers.
+        # Always update status so the session is never left stuck at "processing" or "recording".
+        with suppress(Exception):
+            _failure(ctx.session_id, f"Session terminated unexpectedly: {type(exc).__name__}")
+        raise
 
 
 # ── Thread entry point ────────────────────────────────────────────────────────
@@ -1040,15 +1388,18 @@ def _run_session(session_id: str):
         return
 
     if session.scheduled_for:
+        # Show "scheduled" in the UI while waiting so users know the bot will join
+        update_session(session_id, status="scheduled")
+        _EARLY_JOIN_SECONDS = 90  # open browser 90s before meeting start
         while True:
             latest = get_session(session_id)
             if not latest or latest.status == "cancelled":
                 return
             seconds_until = (latest.scheduled_for - datetime.utcnow()).total_seconds()
-            if seconds_until <= 0:
+            if seconds_until <= _EARLY_JOIN_SECONDS:
                 break
-            _log(session_id, f"Scheduled — waiting {int(seconds_until)}s")
-            time.sleep(min(15, max(1, seconds_until)))
+            _log(session_id, f"Scheduled — starting in {int(seconds_until)}s")
+            time.sleep(min(15, max(1, seconds_until - _EARLY_JOIN_SECONDS)))
 
     if MEETING_BOT_MODE == "stub":
         update_session(
@@ -1074,14 +1425,49 @@ def _run_session(session_id: str):
         meeting_url=session.meeting_url,
         bot_name=session.bot_name or MEETING_BOT_RECORDER_NAME,
         platform=platform,
+        source=session.source or "",
     )
-    asyncio.run(_run_playwright_session(ctx))
+    try:
+        asyncio.run(_run_playwright_session(ctx))
+    except BaseException as exc:
+        # Last-resort guard: if something escaped asyncio.run(), ensure the session
+        # is never left stuck at "processing" or "recording".
+        current = _current_status(ctx.session_id)
+        if current in {"processing", "recording", "preparing", "joining", "waiting_for_host"}:
+            with suppress(Exception):
+                _failure(ctx.session_id, f"Session aborted: {type(exc).__name__}")
 
 
 def start_meeting_bot_session(session_id: str):
-    threading.Thread(target=_run_session, args=(session_id,), daemon=True).start()
+    with _running_lock:
+        if session_id in _running_sessions:
+            return
+        _running_sessions.add(session_id)
+
+    def _wrapped():
+        try:
+            _run_session(session_id)
+        finally:
+            with _running_lock:
+                _running_sessions.discard(session_id)
+
+    threading.Thread(target=_wrapped, daemon=True).start()
 
 
 def start_pending_meeting_bot_sessions():
     for session in list_startable_sessions():
         start_meeting_bot_session(session.id)
+
+
+def _pending_sessions_poll_loop():
+    """Pick up newly created sessions every 30 s (safety net for the calendar sync)."""
+    while True:
+        time.sleep(30)
+        try:
+            start_pending_meeting_bot_sessions()
+        except Exception:
+            pass
+
+
+def start_bot_session_poll_loop():
+    threading.Thread(target=_pending_sessions_poll_loop, name="bot-session-poller", daemon=True).start()

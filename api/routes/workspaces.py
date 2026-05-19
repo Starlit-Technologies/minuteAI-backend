@@ -226,7 +226,17 @@ def get_workspace_bot(
     bot = ensure_workspace_bot_account(workspace_id)
     if not bot:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Recorder bot account not found.")
-    return bot_dict(bot)
+    result = bot_dict(bot)
+    # Override with the real Google account email configured in the admin bot setup
+    try:
+        from models.bot_config import load_bot_config, profile_status as _profile_status
+        cfg = load_bot_config()
+        ps = _profile_status(cfg)
+        if ps.get("signed_in_email"):
+            result["email"] = ps["signed_in_email"]
+    except Exception:
+        pass
+    return result
 
 
 @router.patch("/{workspace_id}/members/{member_id}")

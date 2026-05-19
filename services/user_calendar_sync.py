@@ -9,6 +9,7 @@ import requests
 
 from models.connected_account import ConnectedAccount, list_all_for_sync, upsert_connected_account
 from models.meeting_bot import create_session, get_session_by_user_event
+from services.meeting_bots.runner import start_meeting_bot_session
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +24,7 @@ _GOOGLE_CALENDAR_URL = "https://www.googleapis.com/calendar/v3/calendars/primary
 _ZOOM_MEETINGS_URL   = "https://api.zoom.us/v2/users/me/meetings"
 
 SYNC_INTERVAL     = 300   # 5 minutes
-LOOKAHEAD_MINUTES = 60    # schedule bot up to 60 minutes ahead
+LOOKAHEAD_MINUTES = 180   # schedule bot up to 3 hours ahead
 
 
 def _refresh_google_token(account: ConnectedAccount) -> Optional[str]:
@@ -103,7 +104,8 @@ def _sync_google(account: ConnectedAccount):
         return
 
     now      = datetime.utcnow()
-    time_min = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    # Look back 10 minutes so meetings that just started (between sync ticks) are not missed
+    time_min = (now - timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M:%SZ")
     time_max = (now + timedelta(minutes=LOOKAHEAD_MINUTES)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     res = _fetch_google_events(token, time_min, time_max)
@@ -167,13 +169,14 @@ def _sync_google(account: ConnectedAccount):
             except ValueError:
                 pass
 
-        create_session(
+        session = create_session(
             user_id=account.user_id, workspace_id=workspace_id,
             platform="google_meet", meeting_url=meeting_url,
             bot_name="MinuteAI Recorder", calendar_event_id=event_id,
             source="user_calendar", title=event.get("summary") or "Meeting",
             scheduled_for=scheduled, duration_minutes=duration,
         )
+        start_meeting_bot_session(session.id)
         logger.info("Scheduled bot for Google Meet event %s (user %s)", event_id, account.user_id)
 
 
@@ -215,13 +218,14 @@ def _sync_zoom(account: ConnectedAccount):
         if get_session_by_user_event(account.user_id, event_id):
             continue
 
-        create_session(
+        session = create_session(
             user_id=account.user_id, workspace_id=workspace_id,
             platform="zoom", meeting_url=join_url,
             bot_name="MinuteAI Recorder", calendar_event_id=event_id,
             source="user_calendar", title=meeting.get("topic") or "Zoom Meeting",
             scheduled_for=scheduled, duration_minutes=meeting.get("duration"),
         )
+        start_meeting_bot_session(session.id)
         logger.info("Scheduled bot for Zoom meeting %s (user %s)", event_id, account.user_id)
 
 

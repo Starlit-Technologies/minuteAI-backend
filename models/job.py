@@ -20,14 +20,15 @@ class JobRecord(Base):
     email        = Column(String,  nullable=True)
     audio_path   = Column(String,  nullable=True)
     r2_audio_key = Column(String,  nullable=True)
-    transcript   = Column(Text,    nullable=True)
-    minutes_json = Column(Text,    nullable=True)
-    docx_path    = Column(String,  nullable=True)
-    pdf_path     = Column(String,  nullable=True)
-    starred      = Column(Boolean, nullable=False, default=False)
-    workspace_id = Column(String,  nullable=True, index=True)
-    config_json  = Column(Text,    nullable=True)
-    created_at   = Column(DateTime, server_default=func.now())
+    transcript      = Column(Text,    nullable=True)
+    minutes_json    = Column(Text,    nullable=True)
+    speaker_map_json = Column(Text,   nullable=True)
+    docx_path       = Column(String,  nullable=True)
+    pdf_path        = Column(String,  nullable=True)
+    starred         = Column(Boolean, nullable=False, default=False)
+    workspace_id    = Column(String,  nullable=True, index=True)
+    config_json     = Column(Text,    nullable=True)
+    created_at      = Column(DateTime, server_default=func.now())
 
 
 @dataclass
@@ -41,6 +42,7 @@ class Job:
     r2_audio_key: Optional[str] = None
     transcript: Optional[str] = None
     minutes: Optional[dict] = None
+    speaker_map: Optional[dict] = None
     docx_path: Optional[str] = None
     pdf_path: Optional[str] = None
     starred: bool = False
@@ -58,6 +60,7 @@ def _record_to_job(r: JobRecord) -> Job:
         r2_audio_key=getattr(r, "r2_audio_key", None),
         transcript=r.transcript,
         minutes=json.loads(r.minutes_json) if r.minutes_json else None,
+        speaker_map=json.loads(r.speaker_map_json) if getattr(r, "speaker_map_json", None) else None,
         docx_path=r.docx_path, pdf_path=r.pdf_path,
         starred=bool(getattr(r, "starred", False)),
         workspace_id=getattr(r, "workspace_id", None),
@@ -114,9 +117,11 @@ class JobStore:
                 "transcript": job.transcript,
             }
 
-        db_kwargs = {k: v for k, v in kwargs.items() if k != "minutes"}
+        db_kwargs = {k: v for k, v in kwargs.items() if k not in ("minutes", "speaker_map")}
         if "minutes" in kwargs:
             db_kwargs["minutes_json"] = json.dumps(kwargs["minutes"]) if kwargs["minutes"] else None
+        if "speaker_map" in kwargs:
+            db_kwargs["speaker_map_json"] = json.dumps(kwargs["speaker_map"]) if kwargs["speaker_map"] else None
         with SessionLocal() as session:
             record = session.get(JobRecord, job_id)
             if record:

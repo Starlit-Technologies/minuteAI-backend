@@ -151,7 +151,7 @@ class LiveTranslateSession:
         headers = {"Authorization": f"Token {api_key}"}
 
         try:
-            async with websockets.connect(dg_url, extra_headers=headers) as dg_ws:
+            async with websockets.connect(dg_url, additional_headers=headers) as dg_ws:
                 await self._send({"type": "connected", "message": "Deepgram streaming active"})
                 log.info("Live translate session connected to Deepgram")
 
@@ -374,7 +374,7 @@ class BotLiveTranslateSession:
         headers = {"Authorization": f"Token {api_key}"}
 
         try:
-            async with websockets.connect(dg_url, extra_headers=headers) as dg_ws:
+            async with websockets.connect(dg_url, additional_headers=headers) as dg_ws:
                 await self._send({"type": "connected", "message": "Bot audio streaming active"})
                 log.info("Bot live translate connected to Deepgram")
 

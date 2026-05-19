@@ -19,7 +19,7 @@ from models.meeting_bot import (
 from models.user import User
 from models.user import TeamMember, Workspace
 from services.meeting_bots.platforms import detect_platform
-from services.meeting_bots.runner import start_meeting_bot_session
+from services.meeting_bots.runner import signal_stop, start_meeting_bot_session
 
 router = APIRouter(prefix="/meeting-bots", tags=["meeting-bots"])
 MEETING_BOT_RECORDER_NAME = os.environ.get("MEETING_BOT_RECORDER_NAME", "MinuteAI Recorder").strip() or "MinuteAI Recorder"
@@ -276,6 +276,9 @@ def end_meeting_bot_session(
             failure_reason="Recording ended without capturing audio — the bot may have crashed or lost connection.",
         )
         return _serialize(updated)
+
+    # Signal the recording loop to exit immediately (before the DB poll catches up).
+    signal_stop(session_id)
 
     updated = update_session(
         session_id,

@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import Column, String, Text, Integer, DateTime, func
+from sqlalchemy import Column, String, Text, Integer, DateTime, func, or_
 
 from db.base import Base, SessionLocal
 
@@ -174,16 +174,23 @@ def list_workspace_sessions(*, workspace_id: str) -> list[MeetingBotSession]:
 
 def list_upcoming_workspace_sessions(*, workspace_id: str, limit: int = 5) -> list[MeetingBotSession]:
     now = datetime.utcnow()
+    active_statuses = ["queued", "scheduled", "preparing", "joining", "waiting_for_host", "recording"]
     with SessionLocal() as db:
         records = (
             db.query(MeetingBotSessionRecord)
             .filter(
                 MeetingBotSessionRecord.workspace_id == workspace_id,
-                MeetingBotSessionRecord.scheduled_for.isnot(None),
-                MeetingBotSessionRecord.scheduled_for >= now,
-                MeetingBotSessionRecord.status.in_(["queued", "preparing", "joining", "waiting_for_host", "recording"]),
+                MeetingBotSessionRecord.status.in_(active_statuses),
+                # include: currently active (no scheduled_for) OR future scheduled
+                or_(
+                    MeetingBotSessionRecord.scheduled_for.is_(None),
+                    MeetingBotSessionRecord.scheduled_for >= now,
+                ),
             )
-            .order_by(MeetingBotSessionRecord.scheduled_for.asc())
+            .order_by(
+                MeetingBotSessionRecord.scheduled_for.asc().nullsfirst(),
+                MeetingBotSessionRecord.created_at.desc(),
+            )
             .limit(limit)
             .all()
         )
@@ -194,7 +201,7 @@ def list_startable_sessions() -> list[MeetingBotSession]:
     with SessionLocal() as db:
         records = (
             db.query(MeetingBotSessionRecord)
-            .filter(MeetingBotSessionRecord.status.in_(["queued", "preparing", "joining", "waiting_for_host"]))
+            .filter(MeetingBotSessionRecord.status.in_(["queued", "scheduled", "preparing", "joining", "waiting_for_host"]))
             .order_by(MeetingBotSessionRecord.scheduled_for.asc().nullsfirst(), MeetingBotSessionRecord.created_at.asc())
             .all()
         )
