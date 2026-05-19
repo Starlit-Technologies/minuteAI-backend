@@ -27,6 +27,7 @@ MEETING_BOT_RECORDER_NAME = os.environ.get("MEETING_BOT_RECORDER_NAME", "MinuteA
 
 SUPPORTED_STATUSES = {
     "queued",
+    "scheduled",
     "preparing",
     "joining",
     "waiting_for_host",

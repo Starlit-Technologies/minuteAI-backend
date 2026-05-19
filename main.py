@@ -36,6 +36,7 @@ from models.bot_account import ensure_bot_accounts_for_all_workspaces
 from models.meeting_bot import recover_processing_sessions
 from services.meeting_bots.runner import start_pending_meeting_bot_sessions, start_bot_session_poll_loop
 from services.meeting_bots.calendar_sync import start_calendar_sync_loop
+from services.meeting_bots.health_check import start_health_check_loop
 from services.user_calendar_sync import start_user_calendar_sync_loop
 
 app = FastAPI(title="MinuteAI API", version="1.0.0")
@@ -111,6 +112,7 @@ async def startup():
     start_bot_session_poll_loop()
     start_calendar_sync_loop()
     start_user_calendar_sync_loop()
+    start_health_check_loop()
 
 
 Path("storage/avatars").mkdir(parents=True, exist_ok=True)

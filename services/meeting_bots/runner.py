@@ -276,6 +276,23 @@ def _failure(session_id: str, message: str, **extra):
     update_session(session_id, status="failed", ended_at=datetime.utcnow(), failure_reason=message, **extra)
 
 
+def _flag_auth_failure(reason: str) -> None:
+    """Write an unhealthy health status immediately when sign-in fails mid-session."""
+    try:
+        from datetime import datetime as _dt
+        from services.meeting_bots.health_check import _save, _maybe_send_alert
+        result = {
+            "healthy":    False,
+            "checked_at": _dt.utcnow().isoformat(),
+            "email":      None,
+            "error":      reason,
+        }
+        _save(result)
+        _maybe_send_alert(result)
+    except Exception:
+        pass
+
+
 def _current_status(session_id: str) -> Optional[str]:
     s = get_session(session_id)
     return s.status if s else None
@@ -569,6 +586,7 @@ async def _sign_in_google_meet(page, user_id: str, session_id: str) -> bool:
             _log(session_id, f"[{method}] attempt raised: {exc}")
 
     _log(session_id, "All Google sign-in methods failed — joining as guest")
+    _flag_auth_failure("All Google sign-in methods failed — profile session may have expired.")
     return False
 
 

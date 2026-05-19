@@ -863,6 +863,23 @@ def admin_clear_bot_profile(_: User = Depends(get_admin_user)):
     return _bot_config_response(load_bot_config())
 
 
+@router.get("/bot-config/health")
+def admin_bot_health(_: User = Depends(get_admin_user)):
+    """Return the latest cached bot profile health check result."""
+    from services.meeting_bots.health_check import get_health_status
+    return get_health_status()
+
+
+@router.post("/bot-config/health/check")
+def admin_bot_health_check(_: User = Depends(get_admin_user)):
+    """Trigger an immediate health check and return the fresh result."""
+    from services.meeting_bots.health_check import run_health_check
+    try:
+        return run_health_check()
+    except Exception as exc:
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, str(exc))
+
+
 @router.post("/bot-config/reauth")
 def admin_reauth_bot(_: User = Depends(get_admin_user)):
     """Sign out (clear profile) and immediately open a fresh login browser window."""
