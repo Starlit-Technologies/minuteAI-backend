@@ -1215,6 +1215,10 @@ async def _run_playwright_session(ctx: BotRunContext):
                 # This is the Fireflies-style approach: Meet sees a real Google user, not a guest.
                 bot_profile = _bot_profile_dir if _bot_profile_dir and Path(_bot_profile_dir).is_dir() else None
 
+                # Load exported session cookies (production auth path — no local profile on Render).
+                from models.bot_config import load_session_cookies as _load_session_cookies
+                _session_cookies = _load_session_cookies() if ctx.platform == "google_meet" else None
+
                 shared_context_kwargs = dict(
                     viewport={"width": 1440, "height": 900},
                     permissions=["camera", "microphone"],
@@ -1224,7 +1228,14 @@ async def _run_playwright_session(ctx: BotRunContext):
                     timezone_id="America/New_York",
                 )
 
-                if bot_profile and ctx.platform == "google_meet":
+                if _session_cookies and ctx.platform == "google_meet":
+                    # Cookie injection mode: fresh headless context + stored Google session cookies.
+                    # Used on Render where the local Chrome profile isn't available.
+                    browser = await pw.chromium.launch(headless=True, args=chromium_args)
+                    context = await browser.new_context(**shared_context_kwargs)
+                    await context.add_cookies(_session_cookies)
+                    _log(ctx.session_id, f"Launched with injected session cookies ({len(_session_cookies)} cookies)")
+                elif bot_profile and ctx.platform == "google_meet":
                     # launch_persistent_context owns the browser — no separate browser.close() needed.
                     browser = None
                     context = await pw.chromium.launch_persistent_context(
@@ -1254,13 +1265,18 @@ async def _run_playwright_session(ctx: BotRunContext):
                     # a separate invitation for the bot account.
                     use_user_oauth = ctx.source == "user_calendar"
 
-                    if bot_profile and not use_user_oauth:
+                    if _session_cookies and not use_user_oauth:
+                        # Injected cookies: bot is already authenticated as the configured bot account
+                        sign_in_attempted = True
+                        sign_in_ok        = True
+                        _log(ctx.session_id, f"Joining as bot account ({_bot_email or 'bot'}) via injected session cookies")
+                    elif bot_profile and not use_user_oauth:
                         # Manual sessions: use the pre-signed-in bot profile
                         sign_in_attempted = True
                         sign_in_ok        = True
                         _log(ctx.session_id, f"Joining as bot account ({_bot_email or 'bot'}) via persistent profile")
                     else:
-                        # User-calendar sessions (or no bot profile): sign in as the user
+                        # User-calendar sessions (or no bot profile/cookies): sign in as the user
                         sign_in_attempted = True
                         sign_in_ok = await _sign_in_google_meet(page, ctx.user_id, ctx.session_id)
                         if sign_in_ok:
