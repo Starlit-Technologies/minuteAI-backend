@@ -1401,6 +1401,20 @@ async def _run_playwright_session(ctx: BotRunContext):
 # ── Job entry point (called by RQ worker or directly by thread fallback) ──────
 
 def _run_session(session_id: str):
+    # Track in _running_sessions regardless of RQ vs thread mode so the health
+    # check knows not to open the same Chrome profile while we're using it.
+    with _running_lock:
+        if session_id in _running_sessions:
+            return
+        _running_sessions.add(session_id)
+    try:
+        _run_session_inner(session_id)
+    finally:
+        with _running_lock:
+            _running_sessions.discard(session_id)
+
+
+def _run_session_inner(session_id: str):
     session = get_session(session_id)
     if not session or session.status == "cancelled":
         return
@@ -1408,7 +1422,7 @@ def _run_session(session_id: str):
     # With RQ, the job is enqueued_at (scheduled_for - 90s) so by the time
     # this function runs we're already within the early-join window.
     # In thread-fallback mode we still do the busy-wait for compatibility.
-    if session.scheduled_for and session_id not in _running_sessions:
+    if session.scheduled_for:
         from services.queue import is_redis_available
         if not is_redis_available():
             # Thread fallback: busy-wait until 90s before start
@@ -1494,7 +1508,7 @@ def start_meeting_bot_session(session_id: str):
 
     def _wrapped():
         try:
-            _run_session(session_id)
+            _run_session_inner(session_id)
         finally:
             with _running_lock:
                 _running_sessions.discard(session_id)
