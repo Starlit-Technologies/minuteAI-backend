@@ -78,6 +78,40 @@ def toggle_star(
     return {"starred": record.starred}
 
 
+@router.delete("/{job_id}/recording", status_code=204)
+def delete_recording(
+    job_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Delete only the audio/video file — keeps the meeting, minutes, and transcript."""
+    record = db.query(JobRecord).filter(
+        JobRecord.id == job_id, JobRecord.user_id == current_user.id
+    ).first()
+    if not record:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Meeting not found.")
+
+    r2_key = getattr(record, "r2_audio_key", None)
+    if r2_key:
+        try:
+            from services.storage_r2 import delete_file
+            delete_file(r2_key)
+        except Exception:
+            pass
+
+    local_path = getattr(record, "audio_path", None)
+    if local_path:
+        try:
+            from pathlib import Path as _Path
+            _Path(local_path).unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    record.audio_path = None
+    record.r2_audio_key = None
+    db.commit()
+
+
 @router.delete("/{job_id}", status_code=204)
 def delete_meeting(
     job_id: str,
