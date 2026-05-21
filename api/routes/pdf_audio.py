@@ -1,5 +1,6 @@
 import threading
 import uuid
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Form, HTTPException, UploadFile
 from fastapi.responses import Response
@@ -16,6 +17,27 @@ VALID_PURPOSES = {
     "project_defense", "class_presentation", "conference_talk",
     "study_review", "business_pitch", "podcast",
 }
+
+
+def _public_job(job_id: str, job: dict, include_script: bool = False) -> dict:
+    payload = {
+        "job_id":             job_id,
+        "status":             job.get("status"),
+        "step":               job.get("step"),
+        "filename":           job.get("filename"),
+        "purpose":            job.get("purpose"),
+        "duration_minutes":   job.get("duration_minutes"),
+        "voice":              job.get("voice"),
+        "created_at":         job.get("created_at"),
+        "completed_at":       job.get("completed_at"),
+        "word_count":         job.get("word_count"),
+        "estimated_duration": job.get("estimated_duration"),
+        "error":              job.get("error"),
+        "has_audio":          bool(job.get("audio_bytes")),
+    }
+    if include_script:
+        payload["script"] = job.get("script")
+    return payload
 
 
 @router.post("")
@@ -46,10 +68,27 @@ async def create_job(
             "status": "processing",
             "step":   "Extracting PDF text…",
             "owner":  current_user.id,
+            "filename": file.filename or "presentation.pdf",
+            "purpose": purpose,
+            "duration_minutes": duration_minutes,
+            "voice": voice,
+            "created_at": datetime.now(timezone.utc).isoformat(),
         }
 
     background_tasks.add_task(_process, job_id, pdf_bytes, purpose, duration_minutes, voice)
     return {"job_id": job_id}
+
+
+@router.get("")
+def list_jobs(current_user=Depends(get_current_user)):
+    with _lock:
+        items = [
+            _public_job(job_id, job)
+            for job_id, job in _jobs.items()
+            if job.get("owner") == current_user.id
+        ]
+    items.sort(key=lambda item: item.get("created_at") or "", reverse=True)
+    return {"items": items}
 
 
 @router.get("/{job_id}")
@@ -59,8 +98,7 @@ def get_status(job_id: str, current_user=Depends(get_current_user)):
         raise HTTPException(404, "Job not found.")
     if job.get("owner") != current_user.id:
         raise HTTPException(403, "Not your job.")
-    # Strip large binary field from status response
-    return {k: v for k, v in job.items() if k not in ("audio_bytes", "owner")}
+    return _public_job(job_id, job, include_script=True)
 
 
 @router.get("/{job_id}/audio")
@@ -106,6 +144,7 @@ def _process(job_id: str, pdf_bytes: bytes, purpose: str, duration_minutes: int,
             "audio_bytes":        audio_bytes,
             "word_count":         word_count,
             "estimated_duration": est_duration,
+            "completed_at":       datetime.now(timezone.utc).isoformat(),
         })
 
     except Exception as exc:
