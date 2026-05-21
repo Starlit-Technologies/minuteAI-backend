@@ -116,8 +116,10 @@ OUTPUT RULES (strictly follow):
 
 
 def text_to_speech(script: str, voice: str = "female") -> bytes:
+    import urllib.error
+
     model = VOICES.get(voice, VOICES["female"])
-    url   = f"https://api.deepgram.com/v1/speak?model={model}&encoding=mp3&bit_rate=128000"
+    url   = f"https://api.deepgram.com/v1/speak?model={model}&encoding=mp3"
     data  = json.dumps({"text": script}).encode("utf-8")
     req   = urllib.request.Request(
         url,
@@ -128,9 +130,9 @@ def text_to_speech(script: str, voice: str = "female") -> bytes:
         },
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=180) as resp:
-        status = resp.status
-        body   = resp.read()
-    if status != 200:
-        raise RuntimeError(f"Deepgram TTS error {status}: {body[:200]}")
-    return body
+    try:
+        with urllib.request.urlopen(req, timeout=180) as resp:
+            return resp.read()
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", errors="replace")[:300]
+        raise RuntimeError(f"Deepgram TTS error {e.code}: {detail}")
