@@ -449,14 +449,16 @@ _FILL_NAME_JS = """
         window.HTMLInputElement.prototype, 'value'
     ).set;
     for (const sel of candidates) {
-        const el = document.querySelector(sel);
-        if (el) {
-            setter.call(el, name);
-            el.dispatchEvent(new Event('input',  { bubbles: true }));
+        const els = document.querySelectorAll(sel);
+        for (const el of els) {
+            if (el && el.getBoundingClientRect().width > 0) {
+                setter.call(el, name);
+                el.dispatchEvent(new Event('input',  { bubbles: true }));
             el.dispatchEvent(new Event('change', { bubbles: true }));
             el.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true }));
             el.focus();
             return sel;
+            }
         }
     }
     // Last resort: any visible input by bounding rect
@@ -501,12 +503,67 @@ _CLICK_JOIN_BUTTON_JS = """
 
 async def _sign_in_google_meet_as_bot(page, refresh_token: str, session_id: str) -> bool:
     """
-    Sign the bot account into a fresh browser context using its stored OAuth
-    refresh token.  Same MergeSession/OAuthLogin approach as _sign_in_google_meet
-    but uses the dedicated bot refresh token instead of a user's connected account.
+    Sign the bot account into a fresh browser context.
+
+    Strategy (in order):
+    1. **Stored session cookies** — injected directly via Playwright's
+       ``context.add_cookies()``.  This is the most reliable method on
+       production because Google deprecated the MergeSession/OAuthLogin
+       endpoints that used to convert an access token into browser cookies.
+    2. **MergeSession / OAuthLogin** — legacy fallback kept in case
+       it still works for some account configurations.
+    3. Returns False (guest mode) if nothing succeeds.
     """
     import requests as _req
+    from models.bot_config import load_session_cookies
 
+    # ── Step 1: Try stored session cookies ────────────────────────────────
+    stored_cookies = load_session_cookies()
+    if stored_cookies:
+        try:
+            # Playwright expects each cookie to have url OR (domain + path).
+            # Normalise the cookie dicts so Playwright accepts them.
+            normalised = []
+            for c in stored_cookies:
+                entry = {
+                    "name":     c["name"],
+                    "value":    c["value"],
+                    "domain":   c.get("domain", ".google.com"),
+                    "path":     c.get("path", "/"),
+                    "httpOnly": c.get("httpOnly", False),
+                    "secure":   c.get("secure", True),
+                }
+                if c.get("expires", -1) > 0:
+                    entry["expires"] = c["expires"]
+                if c.get("sameSite"):
+                    site = c["sameSite"]
+                    # Playwright expects title case: Strict, Lax, None
+                    if site.lower() in {"strict", "lax", "none"}:
+                        entry["sameSite"] = site.capitalize() if site.lower() != "none" else "None"
+                normalised.append(entry)
+
+            await page.context.add_cookies(normalised)
+            _log(session_id, f"Injected {len(normalised)} stored session cookies")
+
+            # Navigate to Google to verify the cookies actually work
+            await page.goto("https://myaccount.google.com", wait_until="domcontentloaded", timeout=15000)
+            await page.wait_for_timeout(2000)
+
+            cookies = await page.context.cookies(
+                urls=["https://accounts.google.com", "https://google.com"]
+            )
+            has_session = any(c["name"] in {"SID", "__Secure-3PSID", "HSID", "SSID"} for c in cookies)
+            on_signin = "signin" in page.url.lower() or "sign in" in (await page.title()).lower()
+
+            if has_session and not on_signin:
+                _log(session_id, "Bot sign-in confirmed via stored session cookies")
+                return True
+            else:
+                _log(session_id, "Stored cookies injected but sign-in not confirmed — cookies may be expired")
+        except Exception as exc:
+            _log(session_id, f"Stored cookie injection failed: {exc}")
+
+    # ── Step 2: Try OAuth token → MergeSession/OAuthLogin ────────────────
     if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
         _log(session_id, "Bot OAuth sign-in skipped — no OAuth client credentials configured")
         return False
@@ -520,6 +577,7 @@ async def _sign_in_google_meet_as_bot(page, refresh_token: str, session_id: str)
         }, timeout=15)
         if not resp.ok:
             _log(session_id, f"Bot OAuth token refresh failed: HTTP {resp.status_code}")
+            _flag_auth_failure("Bot OAuth refresh token is invalid or revoked. Re-connect in Admin → Bot Config → Connect Google.")
             return False
         access_token = resp.json().get("access_token")
         if not access_token:
@@ -569,7 +627,7 @@ async def _sign_in_google_meet_as_bot(page, refresh_token: str, session_id: str)
             _log(session_id, f"[{method}] bot sign-in attempt raised: {exc}")
 
     _log(session_id, "Bot OAuth sign-in failed — joining as guest")
-    _flag_auth_failure("Bot OAuth refresh token may have been revoked. Re-connect in Admin → Bot Config.")
+    _flag_auth_failure("Bot OAuth sign-in failed. Session cookies may be expired. Re-export cookies or re-connect in Admin → Bot Config.")
     return False
 
 
@@ -715,16 +773,19 @@ async def _prepare_google_meet(page, meeting_url: str, bot_name: str, session_id
         'input[type="text"]',
     ]:
         with suppress(Exception):
-            field = page.locator(selector).first
-            if await field.is_visible(timeout=3000):
-                await field.triple_click()
-                await field.fill(bot_name)
-                await field.dispatch_event("input")
-                await field.dispatch_event("change")
-                await field.press("Tab")
-                await page.wait_for_timeout(1500)
-                _log(session_id, f"Filled guest name using selector: {selector}")
-                return
+            loc = page.locator(selector)
+            count = await loc.count()
+            for i in range(count):
+                field = loc.nth(i)
+                if await field.is_visible(timeout=500):
+                    await field.triple_click()
+                    await field.fill(bot_name)
+                    await field.dispatch_event("input")
+                    await field.dispatch_event("change")
+                    await field.press("Tab")
+                    await page.wait_for_timeout(1500)
+                    _log(session_id, f"Filled guest name using selector: {selector}")
+                    return
 
     if is_signed_in:
         _log(session_id, "No name input found — profile is signed in, proceeding to join button")

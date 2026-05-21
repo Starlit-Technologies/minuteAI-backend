@@ -2,7 +2,7 @@ import logging
 import os
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import requests
@@ -89,6 +89,18 @@ def _user_workspace(user_id: str) -> Optional[str]:
         return ws.id if ws else None
 
 
+def _parse_time(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo:
+            return parsed.astimezone(timezone.utc).replace(tzinfo=None)
+        return parsed
+    except ValueError:
+        return None
+
+
 def _fetch_google_events(token: str, time_min: str, time_max: str):
     return requests.get(
         _GOOGLE_CALENDAR_URL,
@@ -161,21 +173,16 @@ def _sync_google(account: ConnectedAccount):
         ]
 
         start_str = (event.get("start") or {}).get("dateTime") or (event.get("start") or {}).get("date")
-        if not start_str:
-            continue
-        try:
-            scheduled = datetime.fromisoformat(start_str.replace("Z", "+00:00")).replace(tzinfo=None)
-        except ValueError:
+        scheduled = _parse_time(start_str)
+        if not scheduled:
             continue
 
         duration = None
         end_str = (event.get("end") or {}).get("dateTime")
         if end_str:
-            try:
-                end_dt   = datetime.fromisoformat(end_str.replace("Z", "+00:00")).replace(tzinfo=None)
+            end_dt = _parse_time(end_str)
+            if end_dt:
                 duration = max(1, int((end_dt - scheduled).total_seconds() / 60))
-            except ValueError:
-                pass
 
         session = create_session(
             user_id=account.user_id, workspace_id=workspace_id,
@@ -214,11 +221,8 @@ def _sync_zoom(account: ConnectedAccount):
             continue
 
         start_str = meeting.get("start_time")
-        if not start_str:
-            continue
-        try:
-            scheduled = datetime.fromisoformat(start_str.replace("Z", "+00:00")).replace(tzinfo=None)
-        except ValueError:
+        scheduled = _parse_time(start_str)
+        if not scheduled:
             continue
 
         if not (now <= scheduled <= lookahead):

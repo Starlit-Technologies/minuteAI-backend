@@ -47,8 +47,16 @@ def get_health_status() -> dict:
 
 async def _check_async() -> dict:
     """
-    Open a headless Playwright browser with the bot profile and verify
-    Google session cookies are present and valid.
+    Verify the bot's authentication is still valid.
+
+    Two auth modes are supported:
+    1. **OAuth refresh token** (production) — validates by refreshing the token
+       with Google.  No Playwright or profile directory needed.
+    2. **Persistent Chromium profile** (local dev) — opens the profile headlessly
+       and checks for Google session cookies.
+
+    The function tries OAuth first (since it's the primary prod method), then
+    falls back to the profile-based check.
     """
     import os
     from models.bot_config import load_bot_config, profile_status
@@ -60,9 +68,58 @@ async def _check_async() -> dict:
 
     cfg = load_bot_config()
     ps  = profile_status(cfg)
+    checked_at = datetime.utcnow().isoformat()
+
+    # ── Method 1: OAuth refresh token (primary production auth) ───────────
+    bot_refresh_token = cfg.get("bot_refresh_token", "") or ""
+    if bot_refresh_token:
+        google_client_id     = os.environ.get("GOOGLE_CLIENT_ID", "")
+        google_client_secret = os.environ.get("GOOGLE_CLIENT_SECRET", "")
+        if google_client_id and google_client_secret:
+            try:
+                import requests as _req
+                resp = _req.post("https://oauth2.googleapis.com/token", data={
+                    "client_id":     google_client_id,
+                    "client_secret": google_client_secret,
+                    "refresh_token": bot_refresh_token,
+                    "grant_type":    "refresh_token",
+                }, timeout=15)
+                if resp.ok and resp.json().get("access_token"):
+                    email = cfg.get("bot_oauth_email") or cfg.get("email") or None
+                    return {
+                        "healthy":    True,
+                        "checked_at": checked_at,
+                        "email":      email,
+                        "error":      None,
+                        "auth_mode":  "oauth",
+                    }
+                else:
+                    error_detail = resp.json().get("error_description", resp.text[:200]) if resp.text else f"HTTP {resp.status_code}"
+                    return {
+                        "healthy":    False,
+                        "checked_at": checked_at,
+                        "email":      cfg.get("bot_oauth_email") or None,
+                        "error":      f"Bot OAuth refresh token is invalid or expired: {error_detail}. "
+                                      f"Re-connect via Admin → Bot Config → Connect Google.",
+                        "auth_mode":  "oauth",
+                    }
+            except Exception as exc:
+                log.warning("Bot OAuth health check failed: %s", exc)
+                return {
+                    "healthy":    False,
+                    "checked_at": checked_at,
+                    "email":      cfg.get("bot_oauth_email") or None,
+                    "error":      f"OAuth health check error: {exc}",
+                    "auth_mode":  "oauth",
+                }
+
+    # ── Method 2: Persistent Chromium profile (local dev / legacy) ────────
     if not ps["exists"]:
-        return {"healthy": False, "checked_at": datetime.utcnow().isoformat(),
-                "email": None, "error": "No bot profile found. Run setup first."}
+        return {"healthy": False, "checked_at": checked_at,
+                "email": None,
+                "error": "No bot authentication configured. "
+                         "Either connect a Google account via Admin → Bot Config → Connect Google (recommended), "
+                         "or run the local profile setup."}
 
     profile_dir = cfg.get("profile_dir", "")
 
@@ -70,17 +127,16 @@ async def _check_async() -> dict:
     # (Playwright locks the profile directory).
     from services.meeting_bots.runner import _running_sessions
     if _running_sessions:
-        return {"healthy": None, "checked_at": datetime.utcnow().isoformat(),
+        return {"healthy": None, "checked_at": checked_at,
                 "email": ps.get("signed_in_email"),
                 "error": "Skipped — bot session is currently active."}
 
     try:
         from playwright.async_api import async_playwright
     except ImportError:
-        return {"healthy": None, "checked_at": datetime.utcnow().isoformat(),
+        return {"healthy": None, "checked_at": checked_at,
                 "email": None, "error": "Playwright not installed."}
 
-    checked_at = datetime.utcnow().isoformat()
     try:
         async with async_playwright() as pw:
             ctx = await pw.chromium.launch_persistent_context(
@@ -115,6 +171,7 @@ async def _check_async() -> dict:
                     "error":      None if healthy else (
                         "Google session has expired. Re-authenticate via Admin → Bot Config."
                     ),
+                    "auth_mode":  "profile",
                 }
             finally:
                 await ctx.close()
@@ -126,6 +183,7 @@ async def _check_async() -> dict:
             "checked_at": checked_at,
             "email":      None,
             "error":      f"Health check error: {exc}",
+            "auth_mode":  "profile",
         }
 
 
