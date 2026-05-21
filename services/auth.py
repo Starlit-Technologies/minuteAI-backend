@@ -8,13 +8,46 @@ from datetime import datetime, timedelta, timezone
 
 log = logging.getLogger(__name__)
 
+# ── Disposable email blocklist ─────────────────────────────────────────────────
+
+_DISPOSABLE_DOMAINS: frozenset = frozenset()
+
+def _load_disposable_domains() -> None:
+    global _DISPOSABLE_DOMAINS
+    url = (
+        "https://raw.githubusercontent.com/disposable-email-domains/"
+        "disposable-email-domains/master/disposable_email_blocklist.conf"
+    )
+    try:
+        with urllib.request.urlopen(url, timeout=5) as resp:
+            _DISPOSABLE_DOMAINS = frozenset(
+                line.strip().lower()
+                for line in resp.read().decode().splitlines()
+                if line.strip() and not line.startswith("#")
+            )
+        log.info("Loaded %d disposable email domains", len(_DISPOSABLE_DOMAINS))
+    except Exception as exc:
+        log.warning("Could not fetch disposable domain list (%s); using fallback", exc)
+        _DISPOSABLE_DOMAINS = frozenset({
+            "mailinator.com", "guerrillamail.com", "guerrillamailblock.com",
+            "guerrillamail.info", "guerrillamail.biz", "guerrillamail.de",
+            "grr.la", "sharklasers.com", "spam4.me", "tempmail.com",
+            "throwaway.email", "trashmail.com", "trashmail.me", "trashmail.at",
+            "yopmail.com", "yopmail.fr", "fakeinbox.com", "maildrop.cc",
+            "dispostable.com", "mailnull.com", "spamgourmet.com",
+            "tempr.email", "discard.email", "temp-mail.org", "getnada.com",
+            "mailtemp.info", "emailondeck.com", "getairmail.com",
+        })
+
+_load_disposable_domains()
+
 from fastapi import HTTPException, status
 from passlib.context import CryptContext
 from jose import jwt, JWTError
 from sqlalchemy.orm import Session
 
 from models.user import User, OTPCode, TeamMember
-from services.auth_email import send_verification_otp, send_password_reset_otp
+from services.auth_email import send_verification_otp, send_password_reset_otp, send_login_otp
 
 _pwd = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
@@ -72,6 +105,12 @@ def _user_dict(user: User) -> dict:
         "avatar_url":           user.avatar_url,
         "last_login_at":        user.last_login_at.isoformat() if user.last_login_at else None,
         "onboarding_completed": bool(user.onboarding_completed),
+        "two_factor_enabled":   bool(user.two_factor_enabled),
+        "role":                 user.role,
+        "title":                user.title,
+        "language":             user.language,
+        "trial_ends_at":        user.trial_ends_at.isoformat() if user.trial_ends_at else None,
+        "trial_reminder_sent_at": user.trial_reminder_sent_at.isoformat() if user.trial_reminder_sent_at else None,
     }
 
 
@@ -84,6 +123,13 @@ def _utcnow() -> datetime:
 def register(db: Session, name: str, email: str, password: str) -> dict:
     if db.query(User).filter(User.email == email).first():
         raise HTTPException(status.HTTP_409_CONFLICT, "An account with this email already exists.")
+
+    domain = email.rsplit("@", 1)[-1].lower()
+    if domain in _DISPOSABLE_DOMAINS:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Disposable email addresses are not allowed. Please use a real email address.",
+        )
 
     user = User(name=name, email=email, password_hash=_hash(password))
     db.add(user)
@@ -159,21 +205,7 @@ def verify_email(db: Session, user_id: str, code: str) -> dict:
 
 # ── resend OTP ────────────────────────────────────────────────────────────────
 
-def resend_otp(db: Session, user_id: str, otp_type: str) -> dict:
-    user = db.query(User).filter(User.id == user_id).first()
-    if not user:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found.")
-
-    last = (
-        db.query(OTPCode)
-        .filter(OTPCode.user_id == user_id, OTPCode.type == otp_type, OTPCode.used == False)
-        .order_by(OTPCode.created_at.desc())
-        .first()
-    )
-    if last and last.created_at > _utcnow() - OTP_RESEND_COOLDOWN:
-        wait = int((OTP_RESEND_COOLDOWN - (_utcnow() - last.created_at)).total_seconds())
-        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, f"Please wait {wait}s before requesting a new code.")
-
+def _create_otp(db: Session, user: User, otp_type: str) -> str:
     otp = _gen_otp()
     db.add(OTPCode(
         user_id=user.id,
@@ -181,13 +213,64 @@ def resend_otp(db: Session, user_id: str, otp_type: str) -> dict:
         type=otp_type,
         expires_at=_utcnow() + OTP_TTL,
     ))
+    return otp
+
+
+def _latest_active_otp(db: Session, user_id: str, otp_type: str):
+    return (
+        db.query(OTPCode)
+        .filter(OTPCode.user_id == user_id, OTPCode.type == otp_type, OTPCode.used == False)
+        .order_by(OTPCode.created_at.desc())
+        .first()
+    )
+
+
+def _verify_otp_record(db: Session, user_id: str, otp_type: str, code: str) -> None:
+    record = _latest_active_otp(db, user_id, otp_type)
+    if not record:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "No active code. Request a new one.")
+
+    if record.attempts >= OTP_MAX_ATTEMPTS:
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Too many attempts. Request a new code.")
+
+    record.attempts += 1
+    db.flush()
+
+    if record.expires_at < _utcnow():
+        db.commit()
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Code expired. Request a new one.")
+
+    if record.code != code:
+        db.commit()
+        remaining = OTP_MAX_ATTEMPTS - record.attempts
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Incorrect code. {remaining} attempt{'s' if remaining != 1 else ''} left.")
+
+    record.used = True
+
+
+def resend_otp(db: Session, user_id: str, otp_type: str) -> dict:
+    if otp_type not in {"verify_email", "reset_password", "login_2fa"}:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Unsupported code type.")
+
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found.")
+
+    last = _latest_active_otp(db, user_id, otp_type)
+    if last and last.created_at > _utcnow() - OTP_RESEND_COOLDOWN:
+        wait = int((OTP_RESEND_COOLDOWN - (_utcnow() - last.created_at)).total_seconds())
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, f"Please wait {wait}s before requesting a new code.")
+
+    otp = _create_otp(db, user, otp_type)
     db.commit()
 
     try:
         if otp_type == "verify_email":
             send_verification_otp(user.email, user.name, otp)
-        else:
+        elif otp_type == "reset_password":
             send_password_reset_otp(user.email, user.name, otp)
+        else:
+            send_login_otp(user.email, user.name, otp)
     except Exception as e:
         log.error("Failed to send OTP email to %s: %s", user.email, e)
 
@@ -206,12 +289,76 @@ def login(db: Session, email: str, password: str) -> dict:
             "Please verify your email before signing in.",
             headers={"X-User-Id": user.id},
         )
+    if user.two_factor_enabled:
+        otp = _create_otp(db, user, "login_2fa")
+        db.commit()
+        try:
+            send_login_otp(user.email, user.name, otp)
+        except Exception as e:
+            log.error("Failed to send 2FA email to %s: %s", user.email, e)
+        return {
+            "requires_2fa": True,
+            "user_id": user.id,
+            "email": user.email,
+            "message": "Enter the security code sent to your email.",
+        }
     user.last_login_at = _utcnow()
     db.commit()
     return {**_token_pair(user.id), "user": _user_dict(user)}
 
 
 # ── token refresh ─────────────────────────────────────────────────────────────
+
+def verify_login_2fa(db: Session, user_id: str, code: str) -> dict:
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found.")
+    if not user.two_factor_enabled:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Two-factor authentication is not enabled.")
+
+    _verify_otp_record(db, user.id, "login_2fa", code)
+    user.last_login_at = _utcnow()
+    db.commit()
+    return {**_token_pair(user.id), "user": _user_dict(user)}
+
+
+def start_2fa_setup(db: Session, user: User, current_password: str) -> dict:
+    if not _verify(current_password, user.password_hash):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Current password is incorrect.")
+    if user.two_factor_enabled:
+        return {"message": "Two-factor authentication is already enabled.", "two_factor_enabled": True}
+
+    otp = _create_otp(db, user, "enable_2fa")
+    db.commit()
+    try:
+        send_login_otp(user.email, user.name, otp)
+    except Exception as e:
+        log.error("Failed to send 2FA setup email to %s: %s", user.email, e)
+    return {"message": "A security code has been sent to your email."}
+
+
+def confirm_2fa_setup(db: Session, user: User, code: str) -> dict:
+    if user.two_factor_enabled:
+        return {"message": "Two-factor authentication is already enabled.", "two_factor_enabled": True}
+
+    _verify_otp_record(db, user.id, "enable_2fa", code)
+    user.two_factor_enabled = True
+    db.commit()
+    return {"message": "Two-factor authentication enabled.", "two_factor_enabled": True}
+
+
+def disable_2fa(db: Session, user: User, current_password: str) -> dict:
+    if not _verify(current_password, user.password_hash):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Current password is incorrect.")
+    user.two_factor_enabled = False
+    db.query(OTPCode).filter(
+        OTPCode.user_id == user.id,
+        OTPCode.type.in_(["login_2fa", "enable_2fa"]),
+        OTPCode.used == False,
+    ).update({"used": True}, synchronize_session=False)
+    db.commit()
+    return {"message": "Two-factor authentication disabled.", "two_factor_enabled": False}
+
 
 def refresh_access_token(db: Session, token: str) -> dict:
     try:
@@ -284,6 +431,11 @@ def google_sign_in(db: Session, access_token: str) -> dict:
 
     user = db.query(User).filter(User.email == email).first()
     if user:
+        if user.two_factor_enabled:
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN,
+                "Please sign in with email and password to complete two-factor authentication.",
+            )
         if avatar_url and not user.avatar_url:
             user.avatar_url = avatar_url
         user.last_login_at = _utcnow()

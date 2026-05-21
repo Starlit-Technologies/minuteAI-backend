@@ -22,6 +22,8 @@ class User(Base):
     theme                 = Column(String, nullable=True)
     stripe_customer_id    = Column(String, nullable=True, unique=True, index=True)
     stripe_subscription_id = Column(String, nullable=True)
+    trial_ends_at         = Column(DateTime, nullable=True)
+    trial_reminder_sent_at = Column(DateTime, nullable=True)
     avatar_url            = Column(String, nullable=True)
     last_login_at         = Column(DateTime, nullable=True)
     onboarding_completed  = Column(Boolean, nullable=False, default=False)
@@ -32,6 +34,7 @@ class User(Base):
     recap_to              = Column(String, nullable=True)   # 'everyone' | 'team' | 'me'
     source                = Column(String, nullable=True)
     push_token            = Column(String, nullable=True)
+    two_factor_enabled    = Column(Boolean, nullable=False, default=False)
     created_at            = Column(DateTime, server_default=func.now())
     updated_at     = Column(DateTime, server_default=func.now(), onupdate=datetime.utcnow)
 

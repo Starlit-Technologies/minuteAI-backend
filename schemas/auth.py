@@ -12,6 +12,23 @@ class LoginIn(BaseModel):
     password: str
 
 
+class VerifyLogin2FAIn(BaseModel):
+    user_id: str
+    code: str = Field(..., min_length=6, max_length=6)
+
+
+class Start2FASetupIn(BaseModel):
+    current_password: str
+
+
+class Confirm2FASetupIn(BaseModel):
+    code: str = Field(..., min_length=6, max_length=6)
+
+
+class Disable2FAIn(BaseModel):
+    current_password: str
+
+
 class VerifyEmailIn(BaseModel):
     user_id: str
     code: str = Field(..., min_length=6, max_length=6)

@@ -1,5 +1,5 @@
 import os
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import stripe
@@ -10,6 +10,8 @@ from models.user import PromoCode, PromoCodeRedemption, SubscriptionPlan, User
 
 stripe.api_key = os.environ.get("STRIPE_SECRET_KEY", "")
 APP_URL        = os.environ.get("APP_URL", "http://localhost:5174")
+SIGNUP_TRIAL_DAYS = int(os.environ.get("SIGNUP_TRIAL_DAYS", "30"))
+SIGNUP_TRIAL_PLAN = os.environ.get("SIGNUP_TRIAL_PLAN", "pro")
 
 # Env-var fallback price IDs (used when DB has no plans yet)
 PRICE_IDS = {
@@ -17,6 +19,19 @@ PRICE_IDS = {
     "team": os.environ.get("STRIPE_TEAM_PRICE_ID", ""),
 }
 PLAN_FROM_PRICE = {v: k for k, v in PRICE_IDS.items() if v}
+
+
+def check_payment_method(user) -> bool:
+    """Return True if the user has a payment method on file (or is on a paid plan)."""
+    if user.plan != "free":
+        return True
+    if not user.stripe_customer_id or not stripe.api_key:
+        return False
+    try:
+        pms = stripe.PaymentMethod.list(customer=user.stripe_customer_id, type="card", limit=1)
+        return bool(pms.data)
+    except stripe.error.StripeError:
+        return True  # fail open on Stripe errors
 
 
 def fmt_price(amount: int, currency: str) -> str:
@@ -37,6 +52,44 @@ def get_or_create_customer(db: Session, user: User) -> str:
     user.stripe_customer_id = customer.id
     db.commit()
     return customer.id
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def ensure_signup_trial(
+    db: Session,
+    user: User,
+    customer_id: str,
+    payment_method_id: str,
+) -> Optional[dict]:
+    """Start the default paid-plan trial after signup card collection."""
+    if user.stripe_subscription_id or user.plan != "free":
+        return None
+
+    price = get_price_for_plan(SIGNUP_TRIAL_PLAN, db)
+    trial_ends_at = user.trial_ends_at or (_utcnow() + timedelta(days=SIGNUP_TRIAL_DAYS))
+    trial_end = int(trial_ends_at.replace(tzinfo=timezone.utc).timestamp())
+
+    sub = stripe.Subscription.create(
+        customer=customer_id,
+        items=[{"price": price.id}],
+        default_payment_method=payment_method_id,
+        trial_end=trial_end,
+        payment_settings={"save_default_payment_method": "on_subscription"},
+        metadata={"user_id": user.id, "signup_trial": "true"},
+    )
+
+    user.plan = plan_name_from_price_id(price.id, db, default=SIGNUP_TRIAL_PLAN)
+    user.stripe_subscription_id = sub.id
+    user.trial_ends_at = trial_ends_at
+    db.commit()
+    return {
+        "subscription_id": sub.id,
+        "trial_ends_at": trial_ends_at.isoformat(),
+        "plan": user.plan,
+    }
 
 
 def _db_price_id_for_plan(plan: str, db: Optional[Session]) -> Optional[str]:

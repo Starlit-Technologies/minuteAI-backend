@@ -612,6 +612,59 @@ def get_resources(provider: str, user: User = Depends(get_current_user)):
     return {"resources": []}
 
 
+# ── Zoom upcoming meetings ────────────────────────────────────────────────────
+
+@router.get("/zoom/upcoming")
+def get_upcoming_zoom_meetings(user: User = Depends(get_current_user)):
+    account = get_connected_account(user.id, "zoom")
+    if not account:
+        return {"meetings": [], "connected": False}
+
+    access_token = account.access_token
+
+    # Refresh if within 5 minutes of expiry
+    if account.token_expiry and (account.token_expiry - datetime.utcnow()).total_seconds() < 300:
+        if account.refresh_token:
+            credentials = base64.b64encode(
+                f"{ZOOM_CLIENT_ID}:{ZOOM_CLIENT_SECRET}".encode()
+            ).decode()
+            r = requests.post(
+                _ZOOM_TOKEN_URL,
+                headers={"Authorization": f"Basic {credentials}"},
+                data={"grant_type": "refresh_token", "refresh_token": account.refresh_token},
+            )
+            if r.ok:
+                td = r.json()
+                access_token = td["access_token"]
+                expiry = datetime.utcnow() + timedelta(seconds=td.get("expires_in", 3600))
+                upsert_connected_account(
+                    user_id=user.id, provider="zoom",
+                    access_token=access_token,
+                    refresh_token=td.get("refresh_token", account.refresh_token),
+                    token_expiry=expiry, email=account.email,
+                )
+
+    res = requests.get(
+        "https://api.zoom.us/v2/users/me/meetings",
+        headers={"Authorization": f"Bearer {access_token}"},
+        params={"type": "upcoming", "page_size": 20},
+    )
+    if not res.ok:
+        return {"meetings": [], "connected": True}
+
+    meetings = []
+    for m in res.json().get("meetings", []):
+        meetings.append({
+            "id": str(m["id"]),
+            "title": m.get("topic", "Untitled Meeting"),
+            "start": m.get("start_time", ""),
+            "join_url": m.get("join_url", ""),
+            "duration": m.get("duration"),
+        })
+
+    return {"meetings": meetings, "connected": True}
+
+
 # ── Calendar ──────────────────────────────────────────────────────────────────
 
 @router.get("/calendar/upcoming")

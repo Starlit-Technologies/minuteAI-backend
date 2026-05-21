@@ -197,6 +197,15 @@ def _build_user_message(transcript: str, config: dict | None) -> str:
     if hint:
         lines.append(f"Meeting context: {hint}")
 
+    user_role = (config.get("user_role") or "").strip()
+    user_title = (config.get("user_title") or "").strip()
+    if user_role or user_title:
+        role_label = " / ".join(part for part in [user_role, user_title] if part)
+        lines.append(
+            f"Primary user role/use case: {role_label}. Prioritize details this user is likely to care about, "
+            "while still preserving all important decisions, risks, and action items."
+        )
+
     attendees = (config.get("attendees") or "").strip()
     if attendees:
         lines.append(f"Known attendees: {attendees}")

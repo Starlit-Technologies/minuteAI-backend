@@ -64,6 +64,8 @@ def run_migrations():
             "ALTER TABLE team_members ADD COLUMN IF NOT EXISTS invite_token TEXT",
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS stripe_customer_id TEXT",
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS stripe_subscription_id TEXT",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS trial_ends_at TIMESTAMP",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS trial_reminder_sent_at TIMESTAMP",
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url TEXT",
             "ALTER TABLE team_members ADD COLUMN IF NOT EXISTS workspace_id TEXT",
             "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS workspace_id TEXT",
@@ -94,6 +96,7 @@ def run_migrations():
             "ALTER TABLE connected_accounts ADD COLUMN IF NOT EXISTS settings_json TEXT",
             "CREATE TABLE IF NOT EXISTS consent_events (id TEXT PRIMARY KEY, user_id TEXT, job_id TEXT, session_id TEXT, event_type TEXT NOT NULL, legal_basis TEXT NOT NULL DEFAULT 'contract', user_name TEXT, user_email TEXT, ip_address TEXT, consented_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS push_token TEXT",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS two_factor_enabled BOOLEAN NOT NULL DEFAULT false",
         ]
     else:
         migrations = [
@@ -105,6 +108,8 @@ def run_migrations():
             "ALTER TABLE team_members ADD COLUMN invite_token TEXT",
             "ALTER TABLE users ADD COLUMN stripe_customer_id TEXT",
             "ALTER TABLE users ADD COLUMN stripe_subscription_id TEXT",
+            "ALTER TABLE users ADD COLUMN trial_ends_at DATETIME",
+            "ALTER TABLE users ADD COLUMN trial_reminder_sent_at DATETIME",
             "ALTER TABLE users ADD COLUMN avatar_url TEXT",
             "CREATE TABLE IF NOT EXISTS workspaces (id TEXT PRIMARY KEY, name TEXT NOT NULL, owner_id TEXT NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)",
             "ALTER TABLE team_members ADD COLUMN workspace_id TEXT",
@@ -143,6 +148,7 @@ def run_migrations():
             "ALTER TABLE connected_accounts ADD COLUMN settings_json TEXT",
             "CREATE TABLE IF NOT EXISTS consent_events (id TEXT PRIMARY KEY, user_id TEXT, job_id TEXT, session_id TEXT, event_type TEXT NOT NULL, legal_basis TEXT NOT NULL DEFAULT 'contract', user_name TEXT, user_email TEXT, ip_address TEXT, consented_at DATETIME DEFAULT CURRENT_TIMESTAMP)",
             "ALTER TABLE users ADD COLUMN push_token TEXT",
+            "ALTER TABLE users ADD COLUMN two_factor_enabled INTEGER NOT NULL DEFAULT 0",
         ]
     with engine.connect() as conn:
         for sql in migrations:

@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 
 from middleware.auth import get_db, get_current_user
 from models.user import PromoCode, PromoCodeRedemption, SubscriptionPlan, User
-from schemas.billing import CheckoutIn, PortalIn, PromoCodeIn
+from schemas.billing import CheckoutIn, PortalIn, PromoCodeIn, SetupCheckoutIn, AttachPaymentMethodIn, SubscribeIn
 import services.billing as svc
 
 router = APIRouter(prefix="/billing", tags=["billing"])
@@ -152,12 +152,13 @@ def get_subscription(
         else:
             subs = stripe.Subscription.list(
                 customer=current_user.stripe_customer_id,
-                status="active", limit=1,
+                status="all", limit=10,
                 expand=["data.items.data.price"],
             )
-            if not subs.data:
+            subs_data = [s for s in subs.data if s.status in ("active", "trialing", "past_due")]
+            if not subs_data:
                 return {"status": "free", "plan": current_user.plan}
-            sub = subs.data[0]
+            sub = subs_data[0]
 
         if sub.status not in ("active", "trialing", "past_due"):
             return {"status": sub.status, "plan": current_user.plan}
@@ -191,6 +192,7 @@ def get_subscription(
             "current_period_end":   period_end,
             "cancel_at_period_end": getattr(sub, "cancel_at_period_end", False),
             "cancel_at":            getattr(sub, "cancel_at", None),
+            "trial_end":            getattr(sub, "trial_end", None),
             "amount":               price.unit_amount or 0,
             "currency":             price.currency or "gbp",
             "interval":             getattr(recurring, "interval", None) if recurring else None,
@@ -211,21 +213,25 @@ def sync_subscription(
     try:
         subs = stripe.Subscription.list(
             customer=current_user.stripe_customer_id,
-            status="active", limit=1,
+            status="all", limit=10,
             expand=["data.items.data.price"],
         )
-        if not subs.data:
+        subs_data = [s for s in subs.data if s.status in ("active", "trialing", "past_due")]
+        if not subs_data:
             if current_user.plan != "free":
                 current_user.plan = "free"
                 current_user.stripe_subscription_id = None
                 db.commit()
             return {"plan": current_user.plan}
 
-        sub      = subs.data[0]
+        sub      = subs_data[0]
         price_id = sub.items.data[0].price.id
         plan     = svc.plan_name_from_price_id(price_id, db, default=current_user.plan)
         current_user.plan = plan
         current_user.stripe_subscription_id = sub.id
+        if getattr(sub, "trial_end", None):
+            from datetime import datetime
+            current_user.trial_ends_at = datetime.utcfromtimestamp(sub.trial_end)
         db.commit()
         return {"plan": plan}
     except stripe.error.StripeError as e:
@@ -270,6 +276,173 @@ def list_invoices(
         return []
 
 
+@router.get("/payment-method")
+def get_payment_method(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if not current_user.stripe_customer_id or not stripe.api_key:
+        return {"card": None}
+    try:
+        pms = stripe.PaymentMethod.list(
+            customer=current_user.stripe_customer_id, type="card", limit=1
+        )
+        if not pms.data:
+            return {"card": None}
+        pm   = pms.data[0]
+        card = getattr(pm, "card", None)
+        if not card:
+            return {"card": None}
+        return {
+            "card": {
+                "payment_method_id": pm.id,
+                "brand":     card.brand,
+                "last4":     card.last4,
+                "exp_month": card.exp_month,
+                "exp_year":  card.exp_year,
+            }
+        }
+    except stripe.error.StripeError:
+        return {"card": None}
+
+
+def _get_default_or_first_card(customer_id: str):
+    customer = stripe.Customer.retrieve(customer_id)
+    default_pm = getattr(getattr(customer, "invoice_settings", None), "default_payment_method", None)
+    if default_pm:
+        return default_pm if isinstance(default_pm, str) else default_pm.id
+    pms = stripe.PaymentMethod.list(customer=customer_id, type="card", limit=1)
+    return pms.data[0].id if pms.data else None
+
+
+@router.delete("/payment-method")
+def remove_payment_method(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if current_user.plan != "free":
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Cancel your subscription before removing your payment method.",
+        )
+    if not current_user.stripe_customer_id or not stripe.api_key:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "No billing account found.")
+    try:
+        pms = stripe.PaymentMethod.list(
+            customer=current_user.stripe_customer_id, type="card", limit=10
+        )
+        for pm in pms.data:
+            stripe.PaymentMethod.detach(pm.id)
+    except stripe.error.StripeError as e:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(e))
+    return {"ok": True}
+
+
+@router.get("/has-payment-method")
+def has_payment_method(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if current_user.plan != "free":
+        return {"connected": True}
+    if not current_user.stripe_customer_id or not stripe.api_key:
+        return {"connected": False}
+    try:
+        pms = stripe.PaymentMethod.list(
+            customer=current_user.stripe_customer_id, type="card", limit=1
+        )
+        return {"connected": bool(pms.data)}
+    except stripe.error.StripeError:
+        return {"connected": False}
+
+
+@router.post("/attach-payment-method")
+def attach_payment_method(
+    body: AttachPaymentMethodIn,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if not stripe.api_key:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Billing not configured.")
+    customer_id = svc.get_or_create_customer(db, current_user)
+    try:
+        stripe.PaymentMethod.attach(body.payment_method_id, customer=customer_id)
+        stripe.Customer.modify(
+            customer_id,
+            invoice_settings={"default_payment_method": body.payment_method_id},
+        )
+        trial = svc.ensure_signup_trial(db, current_user, customer_id, body.payment_method_id)
+    except stripe.error.CardError as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, e.user_message or "Card declined.")
+    except stripe.error.StripeError as e:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(e))
+    return {"ok": True, "trial": trial}
+
+
+@router.post("/subscribe")
+def subscribe_to_plan(
+    body: SubscribeIn,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if not stripe.api_key:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Billing not configured.")
+    price = svc.get_price_for_plan(body.plan, db)
+    customer_id = svc.get_or_create_customer(db, current_user)
+    try:
+        payment_method_id = body.payment_method_id
+        if payment_method_id:
+            stripe.PaymentMethod.attach(payment_method_id, customer=customer_id)
+            stripe.Customer.modify(
+                customer_id,
+                invoice_settings={"default_payment_method": payment_method_id},
+            )
+        else:
+            payment_method_id = _get_default_or_first_card(customer_id)
+            if not payment_method_id:
+                raise HTTPException(status.HTTP_400_BAD_REQUEST, "Add a payment method before upgrading.")
+
+        sub_kwargs: dict = {
+            "customer": customer_id,
+            "items": [{"price": price.id}],
+            "default_payment_method": payment_method_id,
+            "payment_behavior": "default_incomplete",
+            "payment_settings": {"save_default_payment_method": "on_subscription"},
+            "expand": ["latest_invoice.payment_intent"],
+            "metadata": {"user_id": current_user.id},
+        }
+        if body.promo_code:
+            promo = svc.validate_promo_code(db, body.promo_code)
+            sub_kwargs["discounts"] = [svc.build_checkout_discount(promo, price)]
+            sub_kwargs["metadata"]["promo_code"] = promo.code
+
+        sub = stripe.Subscription.create(**sub_kwargs)
+    except stripe.error.CardError as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, e.user_message or "Card declined.")
+    except stripe.error.StripeError as e:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(e))
+
+    invoice = sub.latest_invoice
+    pi = getattr(invoice, "payment_intent", None) if invoice else None
+
+    if pi and getattr(pi, "status", None) == "requires_action":
+        return {
+            "status": "requires_action",
+            "subscription_id": sub.id,
+            "client_secret": pi.client_secret,
+        }
+
+    if pi and getattr(pi, "status", None) == "requires_payment_method":
+        stripe.Subscription.cancel(sub.id)
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Payment failed. Please check your card details.")
+
+    plan_name = svc.plan_name_from_price_id(price.id, db, default=body.plan)
+    current_user.plan = plan_name
+    current_user.stripe_subscription_id = sub.id
+    db.commit()
+    return {"status": "active", "subscription_id": sub.id}
+
+
 @router.post("/webhook")
 async def stripe_webhook(request: Request, db: Session = Depends(get_db)):
     payload = await request.body()
@@ -312,6 +485,9 @@ async def stripe_webhook(request: Request, db: Session = Depends(get_db)):
             else:
                 price_id = data["items"]["data"][0]["price"]["id"]
                 user.plan = svc.plan_name_from_price_id(price_id, db, default=user.plan)
+                if data.get("trial_end"):
+                    from datetime import datetime
+                    user.trial_ends_at = datetime.utcfromtimestamp(data["trial_end"])
             db.commit()
 
     return {"received": True}

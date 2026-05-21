@@ -84,6 +84,53 @@ def send_verification_otp(to_email: str, name: str, otp: str) -> None:
     })
 
 
+def send_trial_ending_notice(to_email: str, name: str, trial_end_label: str, plan_name: str) -> None:
+    first = name.split()[0] if name else "there"
+    billing_url = f"{_APP_URL}/billing"
+    body = f"""
+      <h1>Your MinuteAI trial ends soon</h1>
+      <p>Hi {first}, your free month of MinuteAI {plan_name} ends on <strong>{trial_end_label}</strong>.</p>
+      <p>After the trial, your saved card will be charged automatically for your subscription unless you cancel before then.</p>
+      <div style="text-align:center;margin:28px 0;">
+        <a href="{billing_url}" class="btn">Manage billing</a>
+      </div>
+      <hr class="divider" />
+      <div class="note">
+        We are sending this notice at least three days before your trial ends so you have time to review or cancel.
+      </div>
+    """
+    resend.Emails.send({
+        "from": _FROM,
+        "to": [to_email],
+        "subject": "Your MinuteAI trial ends in 3 days",
+        "html": _base_template("Your trial ends soon - MinuteAI", body),
+    })
+
+
+def send_login_otp(to_email: str, name: str, otp: str) -> None:
+    first = name.split()[0] if name else "there"
+    body = f"""
+      <h1>Confirm your sign-in</h1>
+      <p>Hi {first}, enter the code below to finish signing in to MinuteAI.</p>
+      <div class="otp-block">
+        <div class="otp-label">Two-factor code</div>
+        <div class="otp-code">{otp}</div>
+        <div class="otp-expiry">Expires in 15 minutes</div>
+      </div>
+      <p>If this wasn't you, change your password right away.</p>
+      <hr class="divider" />
+      <div class="note">
+        <strong>Security tip:</strong> MinuteAI will never ask for this code outside the sign-in screen.
+      </div>
+    """
+    resend.Emails.send({
+        "from": _FROM,
+        "to": [to_email],
+        "subject": f"{otp} is your MinuteAI sign-in code",
+        "html": _base_template("Confirm your sign-in - MinuteAI", body),
+    })
+
+
 def send_team_invite(
     to_email: str,
     inviter_name: str,

@@ -69,7 +69,9 @@ async def init_upload(
         "audio_language": audio_language or "",
         "custom_instructions": custom_instructions or "",
         "template": template or "standard",
-        "output_language": output_language or "en",
+        "output_language": output_language or (current_user.language if current_user else None) or "en",
+        "user_role": current_user.role if current_user else "",
+        "user_title": current_user.title if current_user else "",
     }
 
     store.create(Job(

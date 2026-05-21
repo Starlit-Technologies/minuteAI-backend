@@ -5,6 +5,8 @@ from pathlib import Path
 from typing import Optional
 
 from models.job import Job, store
+from db.base import SessionLocal
+from models.user import User
 from services.document import generate_docx, generate_pdf
 from services.email import send_error_email, send_minutes_ready
 from services.formatting import format_minutes
@@ -60,6 +62,19 @@ def create_processing_job_from_media(
         config["attendees"] = attendees
     if meeting_title:
         config["meeting_title"] = meeting_title
+    if user_id:
+        try:
+            with SessionLocal() as db:
+                user = db.query(User).filter(User.id == user_id).first()
+                if user:
+                    if user.role:
+                        config["user_role"] = user.role
+                    if user.title:
+                        config["user_title"] = user.title
+                    if user.language:
+                        config["output_language"] = user.language
+        except Exception:
+            pass
 
     store.create(Job(
         id=job_id,
@@ -344,5 +359,4 @@ def run_pipeline(job_id: str):
                 os.unlink(_tmp_audio)
             except OSError:
                 pass
-
 
