@@ -14,6 +14,22 @@ from services.transcription import transcribe
 UPLOAD_DIR = Path(__file__).parent.parent / "storage" / "uploads"
 OUTPUT_DIR = Path(__file__).parent.parent / "storage" / "outputs"
 
+
+def _send_expo_push(token: str, title: str, body: str, data: dict = None):
+    import json as _json, urllib.request as _req
+    payload = _json.dumps({
+        "to": token, "title": title, "body": body,
+        "data": data or {}, "sound": "default",
+    }).encode()
+    r = _req.Request(
+        "https://exp.host/--/api/v2/push/send",
+        data=payload,
+        headers={"Content-Type": "application/json", "Accept": "application/json"},
+        method="POST",
+    )
+    with _req.urlopen(r, timeout=10):
+        pass
+
 # ── Backend selection ─────────────────────────────────────────────────────────
 # TRANSCRIPTION_BACKEND=assemblyai  → diarization, speaker labels, higher accuracy
 # TRANSCRIPTION_BACKEND=groq        → fast, no diarization (default)
@@ -251,6 +267,24 @@ def run_pipeline(job_id: str):
                 pass
 
         meeting_title = minutes.get("title") or "Your meeting"
+
+        # Expo push notification (mobile app)
+        if job.user_id:
+            try:
+                from db.base import SessionLocal as _SL
+                from models.user import User as _User
+                with _SL() as _db:
+                    _u = _db.get(_User, job.user_id)
+                    if _u and _u.push_token:
+                        _send_expo_push(
+                            token=_u.push_token,
+                            title=f"Minutes ready: {meeting_title}",
+                            body="Your meeting minutes have been generated.",
+                            data={"jobId": job_id},
+                        )
+            except Exception:
+                pass
+
         if job.user_id:
             create_notification(
                 user_id=job.user_id,

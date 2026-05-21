@@ -31,6 +31,7 @@ class User(Base):
     meeting_join          = Column(String, nullable=True)   # 'all' | 'own' | 'teammates' | 'invite'
     recap_to              = Column(String, nullable=True)   # 'everyone' | 'team' | 'me'
     source                = Column(String, nullable=True)
+    push_token            = Column(String, nullable=True)
     created_at            = Column(DateTime, server_default=func.now())
     updated_at     = Column(DateTime, server_default=func.now(), onupdate=datetime.utcnow)
 

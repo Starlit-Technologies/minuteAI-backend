@@ -4,6 +4,7 @@ import zipfile
 
 from fastapi import APIRouter, Depends, File, UploadFile
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from middleware.auth import get_db, get_current_user
@@ -71,6 +72,21 @@ def get_usage(
     current_user: User = Depends(get_current_user),
 ):
     return svc.get_usage(db, current_user)
+
+
+class PushTokenIn(BaseModel):
+    token: str
+
+
+@router.put("/me/push-token")
+def update_push_token(
+    body: PushTokenIn,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    current_user.push_token = body.token.strip() or None
+    db.commit()
+    return {"ok": True}
 
 
 @router.delete("/me")

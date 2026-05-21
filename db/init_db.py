@@ -93,6 +93,7 @@ def run_migrations():
             "ALTER TABLE meeting_bot_sessions ADD COLUMN IF NOT EXISTS attendees_json TEXT",
             "ALTER TABLE connected_accounts ADD COLUMN IF NOT EXISTS settings_json TEXT",
             "CREATE TABLE IF NOT EXISTS consent_events (id TEXT PRIMARY KEY, user_id TEXT, job_id TEXT, session_id TEXT, event_type TEXT NOT NULL, legal_basis TEXT NOT NULL DEFAULT 'contract', user_name TEXT, user_email TEXT, ip_address TEXT, consented_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS push_token TEXT",
         ]
     else:
         migrations = [
@@ -141,6 +142,7 @@ def run_migrations():
             "ALTER TABLE meeting_bot_sessions ADD COLUMN attendees_json TEXT",
             "ALTER TABLE connected_accounts ADD COLUMN settings_json TEXT",
             "CREATE TABLE IF NOT EXISTS consent_events (id TEXT PRIMARY KEY, user_id TEXT, job_id TEXT, session_id TEXT, event_type TEXT NOT NULL, legal_basis TEXT NOT NULL DEFAULT 'contract', user_name TEXT, user_email TEXT, ip_address TEXT, consented_at DATETIME DEFAULT CURRENT_TIMESTAMP)",
+            "ALTER TABLE users ADD COLUMN push_token TEXT",
         ]
     with engine.connect() as conn:
         for sql in migrations:
