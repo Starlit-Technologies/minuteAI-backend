@@ -1,5 +1,6 @@
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 
 from sqlalchemy.orm import Session
 
@@ -22,8 +23,25 @@ def parse_meta(record: JobRecord) -> dict:
     }
 
 
+_AUDIO_EXTS = {".mp3", ".m4a", ".wav", ".ogg", ".flac", ".aac", ".opus"}
+_VIDEO_EXTS = {".mp4", ".webm", ".mov"}
+
+
+def _audio_type(record: JobRecord) -> str | None:
+    path = getattr(record, "r2_audio_key", None) or getattr(record, "audio_path", None)
+    if not path:
+        return None
+    suffix = Path(path).suffix.lower()
+    if suffix in _AUDIO_EXTS:
+        return "audio"
+    if suffix in _VIDEO_EXTS:
+        return "video"
+    return "audio"  # default for unknown
+
+
 def job_to_dict(record: JobRecord) -> dict:
     meta = parse_meta(record) if record.status == "done" else {}
+    has_audio = bool(getattr(record, "audio_path", None) or getattr(record, "r2_audio_key", None))
     return {
         "id":           record.id,
         "title":        meta.get("title", "Processing…") if meta else "Processing…",
@@ -34,6 +52,8 @@ def job_to_dict(record: JobRecord) -> dict:
         "status":       "done" if record.status == "done" else (
                         "error" if record.status == "error" else "processing"),
         "starred":      bool(getattr(record, "starred", False)),
+        "has_audio":    has_audio,
+        "audio_type":   _audio_type(record) if has_audio else None,
     }
 
 
