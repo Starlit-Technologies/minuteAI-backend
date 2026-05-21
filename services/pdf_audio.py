@@ -9,6 +9,7 @@ Flow:
 import io
 import json
 import os
+import re
 import urllib.request
 
 DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY", "")
@@ -115,24 +116,112 @@ OUTPUT RULES (strictly follow):
     return msg.content[0].text.strip()
 
 
+def split_text_into_chunks(text: str, max_chars: int = 1900) -> list[str]:
+    """
+    Split text into chunks of at most max_chars characters.
+    It tries to split on sentence boundaries (., ?, !) first,
+    then on spaces (words), and finally on characters if needed.
+    """
+    # Clean up whitespace
+    text = re.sub(r'\s+', ' ', text).strip()
+    if not text:
+        return []
+
+    # If the whole text fits, just return it.
+    if len(text) <= max_chars:
+        return [text]
+
+    # Split text into sentences using lookbehind for sentence-ending punctuation followed by space
+    # (keeps the punctuation with the sentence).
+    sentences = re.split(r'(?<=[.!?])\s+', text)
+
+    chunks = []
+    current_chunk = []
+    current_length = 0
+
+    for sentence in sentences:
+        sentence = sentence.strip()
+        if not sentence:
+            continue
+
+        # If a single sentence fits
+        if len(sentence) <= max_chars:
+            # Check if it fits into the current chunk with a space separator
+            space_needed = 1 if current_chunk else 0
+            if current_length + space_needed + len(sentence) <= max_chars:
+                current_chunk.append(sentence)
+                current_length += space_needed + len(sentence)
+            else:
+                # Close current chunk and start a new one
+                if current_chunk:
+                    chunks.append(" ".join(current_chunk))
+                current_chunk = [sentence]
+                current_length = len(sentence)
+        else:
+            # The sentence itself is longer than max_chars. We must split it by words.
+            words = sentence.split(' ')
+            for word in words:
+                word = word.strip()
+                if not word:
+                    continue
+
+                if len(word) <= max_chars:
+                    space_needed = 1 if current_chunk else 0
+                    if current_length + space_needed + len(word) <= max_chars:
+                        current_chunk.append(word)
+                        current_length += space_needed + len(word)
+                    else:
+                        if current_chunk:
+                            chunks.append(" ".join(current_chunk))
+                        current_chunk = [word]
+                        current_length = len(word)
+                else:
+                    # An extremely long word, split it by length
+                    for i in range(0, len(word), max_chars):
+                        part = word[i:i+max_chars]
+                        space_needed = 1 if current_chunk else 0
+                        if current_length + space_needed + len(part) <= max_chars:
+                            current_chunk.append(part)
+                            current_length += space_needed + len(part)
+                        else:
+                            if current_chunk:
+                                chunks.append(" ".join(current_chunk))
+                            current_chunk = [part]
+                            current_length = len(part)
+
+    if current_chunk:
+        chunks.append(" ".join(current_chunk))
+
+    return chunks
+
+
 def text_to_speech(script: str, voice: str = "female") -> bytes:
     import urllib.error
 
+    chunks = split_text_into_chunks(script)
+    if not chunks:
+        return b""
+
     model = VOICES.get(voice, VOICES["female"])
     url   = f"https://api.deepgram.com/v1/speak?model={model}&encoding=mp3"
-    data  = json.dumps({"text": script}).encode("utf-8")
-    req   = urllib.request.Request(
-        url,
-        data=data,
-        headers={
-            "Authorization": f"Token {DEEPGRAM_API_KEY}",
-            "Content-Type":  "application/json",
-        },
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=180) as resp:
-            return resp.read()
-    except urllib.error.HTTPError as e:
-        detail = e.read().decode("utf-8", errors="replace")[:300]
-        raise RuntimeError(f"Deepgram TTS error {e.code}: {detail}")
+
+    audio_chunks = []
+    for chunk in chunks:
+        data  = json.dumps({"text": chunk}).encode("utf-8")
+        req   = urllib.request.Request(
+            url,
+            data=data,
+            headers={
+                "Authorization": f"Token {DEEPGRAM_API_KEY}",
+                "Content-Type":  "application/json",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=180) as resp:
+                audio_chunks.append(resp.read())
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode("utf-8", errors="replace")[:300]
+            raise RuntimeError(f"Deepgram TTS error {e.code}: {detail}")
+
+    return b"".join(audio_chunks)
