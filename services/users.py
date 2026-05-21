@@ -114,6 +114,28 @@ async def upload_avatar(db: Session, user: User, file: UploadFile) -> dict:
     return {"avatar_url": avatar_url}
 
 
+def delete_account(db: Session, user: User) -> dict:
+    try:
+        from models.consent import ConsentEventRecord
+        db.query(ConsentEventRecord).filter(ConsentEventRecord.user_id == user.id).delete()
+    except Exception:
+        pass
+
+    db.query(JobRecord).filter(JobRecord.user_id == user.id).delete()
+
+    if user.avatar_url:
+        try:
+            avatar_path = Path("storage/avatars") / Path(user.avatar_url).name
+            if avatar_path.exists():
+                avatar_path.unlink()
+        except Exception:
+            pass
+
+    db.delete(user)
+    db.commit()
+    return {"message": "Account deleted."}
+
+
 def get_usage(db: Session, user: User) -> dict:
     done_jobs = (
         db.query(JobRecord)

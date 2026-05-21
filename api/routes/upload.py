@@ -5,11 +5,12 @@ from pathlib import Path
 from typing import Optional
 
 import aiofiles
-from fastapi import APIRouter, Depends, UploadFile, File, Form, HTTPException
+from fastapi import APIRouter, Depends, Request, UploadFile, File, Form, HTTPException
 
 from sqlalchemy.orm import Session
 
 from middleware.auth import get_db, get_optional_user
+from models.consent import log_consent
 from models.job import Job, JobRecord, store
 from models.user import User
 from services.processing_pipeline import start_pipeline
@@ -26,6 +27,7 @@ ALLOWED_EXTENSIONS = {".mp3", ".mp4", ".m4a", ".wav", ".webm", ".ogg"}
 
 @router.post("/upload/init")
 async def init_upload(
+    request: Request,
     filename: str = Form(...),
     filesize: int = Form(...),
     email: Optional[str] = Form(None),
@@ -38,6 +40,7 @@ async def init_upload(
     custom_instructions: Optional[str] = Form(None),
     template: Optional[str] = Form("standard"),
     output_language: Optional[str] = Form("en"),
+    consent_acknowledged: Optional[str] = Form(None),
     db: Session = Depends(get_db),
     current_user: Optional[User] = Depends(get_optional_user),
 ):
@@ -77,6 +80,19 @@ async def init_upload(
         workspace_id=workspace_id,
         job_config=job_config,
     ))
+
+    if consent_acknowledged and consent_acknowledged.lower() in ("true", "1", "yes"):
+        ip = request.headers.get("x-forwarded-for", request.client.host if request.client else None)
+        log_consent(
+            event_type="upload",
+            user_id=current_user.id if current_user else None,
+            job_id=job_id,
+            legal_basis="contract",
+            user_name=current_user.name if current_user else None,
+            user_email=current_user.email if current_user else (email or None),
+            ip_address=ip,
+        )
+
     return {"jobId": job_id, "chunkSize": 5 * 1024 * 1024}
 
 

@@ -165,7 +165,10 @@ def run_pipeline(job_id: str):
     try:
         transcript = job.transcript
         if not transcript:
-            backend = TRANSCRIPTION_BACKEND
+            lang = (job.job_config or {}).get("audio_language") or None
+            # AssemblyAI does not support Nigerian/African languages — route those through Whisper
+            WHISPER_ONLY_LANGS = {"yo", "ig", "ha"}
+            backend = "groq" if lang in WHISPER_ONLY_LANGS else TRANSCRIPTION_BACKEND
             backend_label = "AssemblyAI (with speaker diarization)" if backend == "assemblyai" else "Whisper"
             store.update(job_id, status="transcribing",
                          message=f"Transcribing audio with {backend_label}…")
@@ -181,7 +184,6 @@ def run_pipeline(job_id: str):
                 audio_path, is_temp = _resolve_audio(job)
                 if is_temp:
                     _tmp_audio = audio_path
-                lang = (job.job_config or {}).get("audio_language") or None
                 transcript = transcribe(audio_path, on_partial=on_partial, language=lang or None)
 
             if not transcript or not transcript.strip():

@@ -65,6 +65,7 @@ def get_results(job_id: str):
     if job.transcript:
         result["transcript"] = _apply_speaker_map(job.transcript, speaker_map)
     result["speaker_map"] = speaker_map
+    result["has_audio"] = bool(job.audio_path or job.r2_audio_key)
     return result
 
 

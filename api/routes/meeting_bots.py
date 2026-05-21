@@ -2,12 +2,13 @@ import os
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from middleware.auth import get_current_user, get_db
 from models.bot_account import ensure_workspace_bot_account
+from models.consent import log_consent
 from models.meeting_bot import (
     create_session,
     get_session,
@@ -46,6 +47,7 @@ class CreateMeetingBotSessionPayload(BaseModel):
     workspace_id: Optional[str] = None
     scheduled_for: Optional[datetime] = None
     duration_minutes: Optional[int] = Field(default=30, ge=5, le=480)
+    consent_acknowledged: bool = False
 
 
 def _utc(dt: datetime) -> datetime:
@@ -99,6 +101,7 @@ def _ensure_workspace_access(workspace_id: str, current_user: User, db: Session)
 @router.post("")
 def create_meeting_bot_session(
     payload: CreateMeetingBotSessionPayload,
+    request: Request,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -128,6 +131,19 @@ def create_meeting_bot_session(
         duration_minutes=payload.duration_minutes,
     )
     start_meeting_bot_session(session.id)
+
+    if payload.consent_acknowledged:
+        ip = request.headers.get("x-forwarded-for", request.client.host if request.client else None)
+        log_consent(
+            event_type="bot",
+            user_id=current_user.id,
+            session_id=session.id,
+            legal_basis="contract",
+            user_name=current_user.name,
+            user_email=current_user.email,
+            ip_address=ip,
+        )
+
     return _serialize(session)
 
 

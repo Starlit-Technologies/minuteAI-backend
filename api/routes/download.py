@@ -11,6 +11,18 @@ MIME_TYPES = {
     "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     "pdf": "application/pdf",
 }
+
+AUDIO_MIME = {
+    ".mp3": "audio/mpeg",
+    ".mp4": "video/mp4",
+    ".m4a": "audio/mp4",
+    ".wav": "audio/wav",
+    ".ogg": "audio/ogg",
+    ".webm": "video/webm",
+    ".flac": "audio/flac",
+    ".aac": "audio/aac",
+    ".opus": "audio/opus",
+}
 VALID_TEMPLATES = {"standard", "modern", "executive", "minimal"}
 OUTPUT_DIR = Path("storage/outputs")
 
@@ -85,3 +97,22 @@ def download_file(job_id: str, fmt: str, template: Optional[str] = Query(None)):
     from services.storage_r2 import r2_key_for_output
     r2_key = r2_key_for_output(job_id, fmt)
     return _serve_file(local_path or "", r2_key, MIME_TYPES[fmt], filename)
+
+
+@router.get("/download/{job_id}/audio")
+def download_audio(job_id: str):
+    job = store.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found.")
+
+    local_path = job.audio_path or ""
+    r2_key = job.r2_audio_key or ""
+
+    if not local_path and not r2_key:
+        raise HTTPException(status_code=404, detail="Recording not available.")
+
+    suffix = Path(local_path).suffix or Path(r2_key).suffix or ".mp4"
+    media_type = AUDIO_MIME.get(suffix.lower(), "application/octet-stream")
+    filename = f"recording{suffix}"
+
+    return _serve_file(local_path, r2_key, media_type, filename)

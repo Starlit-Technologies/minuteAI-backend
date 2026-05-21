@@ -73,6 +73,14 @@ def get_usage(
     return svc.get_usage(db, current_user)
 
 
+@router.delete("/me")
+def delete_account(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    return svc.delete_account(db, current_user)
+
+
 @router.get("/me/export")
 def export_data(
     db: Session = Depends(get_db),
