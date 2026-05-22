@@ -708,6 +708,7 @@ def admin_create_plan(
         audio_hours_per_month=body.audio_hours_per_month,
         max_workspaces=body.max_workspaces,
         max_members=body.max_members,
+        credits_per_month=body.credits_per_month,
         is_active=True,
         is_popular=body.is_popular,
         sort_order=body.sort_order,
@@ -770,6 +771,8 @@ def admin_update_plan(
         plan.max_workspaces = body.max_workspaces
     if "max_members" in body.__fields_set__:
         plan.max_members = body.max_members
+    if "credits_per_month" in body.__fields_set__:
+        plan.credits_per_month = body.credits_per_month
 
     db.commit()
     db.refresh(plan)

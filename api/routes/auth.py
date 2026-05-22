@@ -103,6 +103,7 @@ def me(current_user: User = Depends(get_current_user)):
         "title":                current_user.title,
         "language":             current_user.language,
         "has_payment_method":   billing_svc.check_payment_method(current_user),
+        "source":               current_user.source,
         "trial_ends_at":        current_user.trial_ends_at.isoformat() if current_user.trial_ends_at else None,
         "trial_reminder_sent_at": current_user.trial_reminder_sent_at.isoformat() if current_user.trial_reminder_sent_at else None,
     }

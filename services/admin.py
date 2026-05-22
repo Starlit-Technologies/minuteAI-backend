@@ -215,6 +215,7 @@ def plan_row(plan: SubscriptionPlan, db: Session) -> dict:
         "audio_hours_per_month": plan.audio_hours_per_month,  # None = unlimited
         "max_workspaces":        plan.max_workspaces,         # None = unlimited
         "max_members":           plan.max_members,            # None = unlimited
+        "credits_per_month":     plan.credits_per_month,      # None = unlimited; Steph AI copilot chats
         "stripe_product_id": plan.stripe_product_id,
         "stripe_price_id": plan.stripe_price_id,
         "stripe_synced": bool(plan.stripe_product_id and plan.stripe_price_id),

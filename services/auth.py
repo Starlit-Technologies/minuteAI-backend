@@ -97,6 +97,7 @@ def _token_pair(user_id: str) -> dict:
 
 
 def _user_dict(user: User) -> dict:
+    from services.billing import check_payment_method
     return {
         "id":                   user.id,
         "name":                 user.name,
@@ -109,6 +110,8 @@ def _user_dict(user: User) -> dict:
         "role":                 user.role,
         "title":                user.title,
         "language":             user.language,
+        "has_payment_method":   check_payment_method(user),
+        "source":               user.source,
         "trial_ends_at":        user.trial_ends_at.isoformat() if user.trial_ends_at else None,
         "trial_reminder_sent_at": user.trial_reminder_sent_at.isoformat() if user.trial_reminder_sent_at else None,
     }
@@ -322,9 +325,10 @@ def verify_login_2fa(db: Session, user_id: str, code: str) -> dict:
     return {**_token_pair(user.id), "user": _user_dict(user)}
 
 
-def start_2fa_setup(db: Session, user: User, current_password: str) -> dict:
-    if not _verify(current_password, user.password_hash):
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Current password is incorrect.")
+def start_2fa_setup(db: Session, user: User, current_password) -> dict:
+    if user.source != "google":
+        if not current_password or not _verify(current_password, user.password_hash):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Current password is incorrect.")
     if user.two_factor_enabled:
         return {"message": "Two-factor authentication is already enabled.", "two_factor_enabled": True}
 
@@ -347,9 +351,10 @@ def confirm_2fa_setup(db: Session, user: User, code: str) -> dict:
     return {"message": "Two-factor authentication enabled.", "two_factor_enabled": True}
 
 
-def disable_2fa(db: Session, user: User, current_password: str) -> dict:
-    if not _verify(current_password, user.password_hash):
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Current password is incorrect.")
+def disable_2fa(db: Session, user: User, current_password) -> dict:
+    if user.source != "google":
+        if not current_password or not _verify(current_password, user.password_hash):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Current password is incorrect.")
     user.two_factor_enabled = False
     db.query(OTPCode).filter(
         OTPCode.user_id == user.id,
@@ -447,6 +452,7 @@ def google_sign_in(db: Session, access_token: str) -> dict:
             password_hash=_hash(secrets.token_urlsafe(32)),
             email_verified=True,
             avatar_url=avatar_url,
+            source="google",
         )
         db.add(user)
         db.flush()

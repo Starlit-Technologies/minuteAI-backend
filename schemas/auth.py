@@ -1,3 +1,4 @@
+from typing import Optional
 from pydantic import BaseModel, EmailStr, Field
 
 
@@ -18,7 +19,7 @@ class VerifyLogin2FAIn(BaseModel):
 
 
 class Start2FASetupIn(BaseModel):
-    current_password: str
+    current_password: Optional[str] = None  # not required for Google-authed users
 
 
 class Confirm2FASetupIn(BaseModel):
@@ -26,7 +27,7 @@ class Confirm2FASetupIn(BaseModel):
 
 
 class Disable2FAIn(BaseModel):
-    current_password: str
+    current_password: Optional[str] = None  # not required for Google-authed users
 
 
 class VerifyEmailIn(BaseModel):

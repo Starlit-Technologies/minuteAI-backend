@@ -127,6 +127,7 @@ class SubscriptionPlan(Base):
     audio_hours_per_month = Column(Integer, nullable=True)   # NULL = unlimited
     max_workspaces        = Column(Integer, nullable=True)   # NULL = unlimited
     max_members           = Column(Integer, nullable=True)   # NULL = unlimited per workspace
+    credits_per_month     = Column(Integer, nullable=True)   # NULL = unlimited; used for Steph AI copilot chats
     stripe_product_id     = Column(String, nullable=True, index=True)
     stripe_price_id       = Column(String, nullable=True, index=True)
     is_active             = Column(Boolean, nullable=False, default=True)

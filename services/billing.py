@@ -31,7 +31,7 @@ def check_payment_method(user) -> bool:
         pms = stripe.PaymentMethod.list(customer=user.stripe_customer_id, type="card", limit=1)
         return bool(pms.data)
     except stripe.error.StripeError:
-        return True  # fail open on Stripe errors
+        return False  # fail closed on Stripe errors
 
 
 def fmt_price(amount: int, currency: str) -> str:

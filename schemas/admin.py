@@ -52,6 +52,7 @@ class CreatePlanIn(BaseModel):
     audio_hours_per_month: Optional[int]       = None  # None = unlimited
     max_workspaces:        Optional[int]       = None  # None = unlimited
     max_members:           Optional[int]       = None  # None = unlimited per workspace
+    credits_per_month:     Optional[int]       = None  # None = unlimited; Steph AI copilot chats
     is_popular:            bool                = False
     sort_order:            int                 = 0
     sync_stripe:           bool                = True  # create product+price in Stripe
@@ -68,6 +69,7 @@ class UpdatePlanIn(BaseModel):
     audio_hours_per_month: Optional[int]       = None  # None = unlimited
     max_workspaces:        Optional[int]       = None  # None = unlimited
     max_members:           Optional[int]       = None  # None = unlimited per workspace
+    credits_per_month:     Optional[int]       = None  # None = unlimited; Steph AI copilot chats
     is_active:             Optional[bool]      = None
     is_popular:            Optional[bool]      = None
     sort_order:            Optional[int]       = None

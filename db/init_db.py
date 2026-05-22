@@ -97,6 +97,7 @@ def run_migrations():
             "CREATE TABLE IF NOT EXISTS consent_events (id TEXT PRIMARY KEY, user_id TEXT, job_id TEXT, session_id TEXT, event_type TEXT NOT NULL, legal_basis TEXT NOT NULL DEFAULT 'contract', user_name TEXT, user_email TEXT, ip_address TEXT, consented_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS push_token TEXT",
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS two_factor_enabled BOOLEAN NOT NULL DEFAULT false",
+            "ALTER TABLE subscription_plans ADD COLUMN IF NOT EXISTS credits_per_month INTEGER",
         ]
     else:
         migrations = [
@@ -149,6 +150,7 @@ def run_migrations():
             "CREATE TABLE IF NOT EXISTS consent_events (id TEXT PRIMARY KEY, user_id TEXT, job_id TEXT, session_id TEXT, event_type TEXT NOT NULL, legal_basis TEXT NOT NULL DEFAULT 'contract', user_name TEXT, user_email TEXT, ip_address TEXT, consented_at DATETIME DEFAULT CURRENT_TIMESTAMP)",
             "ALTER TABLE users ADD COLUMN push_token TEXT",
             "ALTER TABLE users ADD COLUMN two_factor_enabled INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE subscription_plans ADD COLUMN credits_per_month INTEGER",
         ]
     with engine.connect() as conn:
         for sql in migrations:
