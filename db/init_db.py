@@ -12,6 +12,7 @@ def create_tables():
     import models.bot_account     # noqa: F401
     import models.connected_account  # noqa: F401
     import models.consent         # noqa: F401
+    import models.meeting_thread  # noqa: F401
     from db.base import Base
     Base.metadata.create_all(bind=engine)
 
@@ -98,6 +99,15 @@ def run_migrations():
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS push_token TEXT",
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS two_factor_enabled BOOLEAN NOT NULL DEFAULT false",
             "ALTER TABLE subscription_plans ADD COLUMN IF NOT EXISTS credits_per_month INTEGER",
+            # Meeting Thread system
+            "CREATE TABLE IF NOT EXISTS meeting_threads (id TEXT PRIMARY KEY, workspace_id TEXT, created_by TEXT NOT NULL, name TEXT NOT NULL, participants_hash TEXT NOT NULL, participants_json TEXT, is_locked BOOLEAN NOT NULL DEFAULT false, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
+            "CREATE TABLE IF NOT EXISTS thread_sessions (id TEXT PRIMARY KEY, thread_id TEXT NOT NULL REFERENCES meeting_threads(id) ON DELETE CASCADE, job_id TEXT NOT NULL UNIQUE REFERENCES jobs(id) ON DELETE CASCADE, session_number INTEGER NOT NULL DEFAULT 1, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
+            # Task PM-sync fields
+            "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS external_id TEXT",
+            "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS external_provider TEXT",
+            "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS synced_at TIMESTAMP",
+            # Meeting thread category
+            "ALTER TABLE meeting_threads ADD COLUMN IF NOT EXISTS category TEXT",
         ]
     else:
         migrations = [
@@ -151,6 +161,15 @@ def run_migrations():
             "ALTER TABLE users ADD COLUMN push_token TEXT",
             "ALTER TABLE users ADD COLUMN two_factor_enabled INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE subscription_plans ADD COLUMN credits_per_month INTEGER",
+            # Meeting Thread system
+            "CREATE TABLE IF NOT EXISTS meeting_threads (id TEXT PRIMARY KEY, workspace_id TEXT, created_by TEXT NOT NULL, name TEXT NOT NULL, participants_hash TEXT NOT NULL, participants_json TEXT, is_locked INTEGER NOT NULL DEFAULT 0, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)",
+            "CREATE TABLE IF NOT EXISTS thread_sessions (id TEXT PRIMARY KEY, thread_id TEXT NOT NULL REFERENCES meeting_threads(id) ON DELETE CASCADE, job_id TEXT NOT NULL UNIQUE REFERENCES jobs(id) ON DELETE CASCADE, session_number INTEGER NOT NULL DEFAULT 1, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)",
+            # Task PM-sync fields
+            "ALTER TABLE tasks ADD COLUMN external_id TEXT",
+            "ALTER TABLE tasks ADD COLUMN external_provider TEXT",
+            "ALTER TABLE tasks ADD COLUMN synced_at DATETIME",
+            # Meeting thread category
+            "ALTER TABLE meeting_threads ADD COLUMN category TEXT",
         ]
     with engine.connect() as conn:
         for sql in migrations:

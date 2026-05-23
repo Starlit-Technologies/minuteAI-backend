@@ -1,0 +1,776 @@
+================================================================================
+                    STEPH — AI-POWERED MEETING INTELLIGENCE PLATFORM
+                    Product Feature Findings & Full Technical Strategy Report
+                    Version 2.0  |  May 23, 2026  |  Confidential
+================================================================================
+
+Tech Stack: Deepgram STT | AssemblyAI | WebRTC | ElevenLabs TTS | Claude LLM
+
+This report documents the full feature vision, technical architecture, and
+strategic roadmap for the Steph platform — a next-generation AI meeting
+intelligence tool that goes far beyond transcription, positioning your product
+as the AI Chief of Staff for modern teams.
+
+================================================================================
+                              TABLE OF CONTENTS
+================================================================================
+
+  PART A — PLATFORM FOUNDATION
+    1.  Platform Vision & Positioning
+    2.  Technology Stack — Deepgram & AssemblyAI
+    3.  PDF to Audio — The Entry Feature
+
+  PART B — FEATURE CATALOGUE
+    4.  Meeting Intelligence Features
+    5.  Sales & Client-Facing Features
+    6.  Content Repurposing Features
+    7.  Knowledge Management Features
+    8.  Productivity & Wellness Features
+
+  PART C — THE FLAGSHIP: STEPH
+    9.  AI Chief of Staff — The Core Vision
+    10. Meeting Context Isolation (Critical Design Principle)
+    11. Previous Meeting Continuity
+    12. Steph — Identity, Voice & Personalisation
+    13. Voice Activation & Wake Word Intelligence
+    14. Real-Time Voice Interaction Modes
+    15. Host Control Panel
+    16. Steph as an Intelligent Contributor
+
+  PART D — STRATEGY
+    17. Phased Build Roadmap
+    18. Competitive Positioning
+    19. Monetisation Considerations
+
+
+================================================================================
+                         PART A — PLATFORM FOUNDATION
+================================================================================
+
+--------------------------------------------------------------------------------
+1.  PLATFORM VISION & POSITIONING
+--------------------------------------------------------------------------------
+
+Most meeting tools are passive — they sit in the corner, record what happens,
+and hand you a transcript afterwards. Steph is fundamentally different. The
+platform is designed to be an active, voice-driven intelligence layer that
+operates before, during, and after every meeting — serving both individual
+contributors and business leaders across all industries.
+
+The platform serves a wide range of users: sales teams closing deals, developers
+running standups, executives making strategic decisions, and professionals
+preparing for high-stakes presentations. What unites them is a shared need — to
+make every meeting count and never lose a critical piece of context again.
+
+  "Most platforms give you records of the past.
+   Steph gives you leverage over what happens next."
+
+THE THREE PILLARS OF STEPH:
+
+  Pillar 1 — MEMORY
+  Steph remembers everything across all meetings, documents, and commitments.
+  User Benefit: Nothing falls through the cracks — ever.
+
+  Pillar 2 — INTELLIGENCE
+  Steph synthesises information and surfaces insights proactively.
+  User Benefit: Leaders always walk in prepared.
+
+  Pillar 3 — PRESENCE
+  Steph participates live — listening, speaking, and responding on command.
+  User Benefit: Every meeting has an expert participant with perfect recall.
+
+
+--------------------------------------------------------------------------------
+2.  TECHNOLOGY STACK — DEEPGRAM & ASSEMBLYAI
+--------------------------------------------------------------------------------
+
+The platform is built on two of the most powerful speech-to-text engines
+available today — Deepgram and AssemblyAI. Rather than choosing one, the
+architecture leverages both strategically, routing audio through whichever
+engine best fits the use case. This gives Steph best-in-class accuracy, speed,
+and intelligence across all meeting types.
+
+── DEEPGRAM — Real-Time Streaming STT ──────────────────────────────────────────
+
+Deepgram is optimised for ultra-low latency, real-time transcription. It is the
+engine that powers Steph's live listening during calls. Its Nova-2 model achieves
+word error rates competitive with human transcription and processes audio in near
+real-time — critical for Steph to detect her wake word and respond promptly
+without awkward delays.
+
+Deepgram strengths leveraged in Steph:
+  • Streaming transcription via WebSocket — Steph hears the meeting as it
+    happens, word by word
+  • Speaker diarisation — identifies who is speaking at any moment, enabling
+    per-person action item attribution
+  • Custom vocabulary — train on industry terms, product names, and internal
+    jargon for accurate transcription
+  • Wake word detection — Deepgram's streaming API detects 'Steph' (or the
+    user's custom bot name) in real time
+  • Punctuation and formatting — produces clean, readable transcripts without
+    manual cleanup
+  • Language detection — automatically identifies and switches between supported
+    languages mid-conversation
+
+── ASSEMBLYAI — Post-Processing & Deep Intelligence ────────────────────────────
+
+AssemblyAI is the platform's post-meeting intelligence engine. Where Deepgram
+excels at speed, AssemblyAI excels at understanding. After each meeting, the
+transcript is passed through AssemblyAI's LeMUR and Audio Intelligence models to
+extract meaning, generate summaries, and identify key moments — fuelling the AI
+Chief of Staff layer.
+
+AssemblyAI capabilities used:
+  • LeMUR (Large Language Model for Universal Retrieval) — ask natural language
+    questions over any transcript
+  • Auto Chapters — automatically segments the meeting into titled topics with
+    timestamps
+  • Action Items extraction — identifies commitments, owners, and deadlines from
+    natural conversation
+  • Sentiment Analysis — detects emotional tone per speaker, per sentence,
+    fuelling the Deal Sentiment Tracker
+  • PII redaction — automatically removes personal identifiable information from
+    sensitive meeting transcripts
+  • Content Safety Detection — flags inappropriate or legally sensitive language
+    in recorded calls
+  • Key Phrases — extracts the most important concepts from a meeting for
+    flashcard and summary generation
+  • Speaker labels — cross-referenced with Deepgram diarisation for highly
+    accurate attribution
+
+── HOW THE TWO ENGINES WORK TOGETHER ───────────────────────────────────────────
+
+  Stage                  | Engine         | What Happens
+  -----------------------|----------------|------------------------------------------
+  Live Call — Real Time  | Deepgram       | Streams audio, detects wake word, transcribes
+  Live Call — Response   | Claude LLM     | Processes Steph's query, generates response
+  Post-Meeting Pass 1    | AssemblyAI     | Deep NLP: summaries, action items, sentiment
+  Post-Meeting Pass 2    | Claude LLM     | Chief of Staff: patterns, risks, briefing
+  Storage                | Platform DB    | Transcript, summary, embeddings per thread
+  Retrieval              | Vector Search  | Semantic search across all meeting content
+
+  !! IMPORTANT NOTE !!
+  Deepgram streams audio via WebSocket during live calls. AssemblyAI processes
+  the final recording post-call. Never run both simultaneously on the same audio
+  stream — this doubles cost without benefit. Route live audio to Deepgram only,
+  then send the completed recording to AssemblyAI.
+
+
+--------------------------------------------------------------------------------
+3.  PDF TO AUDIO — THE ENTRY FEATURE
+--------------------------------------------------------------------------------
+
+PDF to Audio is the platform's lowest-friction entry point — the feature that
+gets users in the door. A professional uploads a report, proposal, or
+presentation and receives a polished, narrated audio version they can listen to
+while commuting, exercising, or preparing for a high-stakes meeting.
+
+Core enhancements beyond basic narration:
+
+  ▶ Summary Layering
+  Users choose between three listening modes: full audio narration, a 5-minute
+  intelligent summary that preserves all key decisions, or a 60-second headline
+  brief. The summary is generated by Claude after AssemblyAI extracts key phrases
+  from the document text.
+
+  ▶ Voice & Style Selection
+  Choose from multiple narrator personas — a professional boardroom voice, a
+  conversational peer tone, or a neutral academic style. Powered by ElevenLabs
+  TTS for high-quality, natural-sounding output across languages and accents.
+
+  ▶ Slide-to-Script Generator
+  Converts a PowerPoint or PDF slide deck into a full presenter script —
+  paragraph by paragraph, slide by slide. Ideal for executives preparing for
+  board presentations or professionals rehearsing client pitches. The script is
+  also narrated as audio.
+
+  ▶ Comprehension Quiz
+  After listening, users are offered a short quiz generated by Claude based on
+  the document content. Questions are multiple choice and short answer. Results
+  are stored on the dashboard to track knowledge retention over time.
+
+  ▶ Smart Flashcard Generator
+  AssemblyAI's Key Phrases model extracts the most important concepts from the
+  document. Claude then converts these into spaced-repetition flashcards
+  presented in the app — ideal for preparing for technical presentations or
+  complex client meetings.
+
+  ▶ Multilingual Narration
+  Upload a PDF in any language and receive the audio in the same language, or
+  choose to translate and narrate it in a different language — useful for
+  multinational teams preparing localised presentations.
+
+
+================================================================================
+                         PART B — FEATURE CATALOGUE
+================================================================================
+
+--------------------------------------------------------------------------------
+4.  MEETING INTELLIGENCE FEATURES
+--------------------------------------------------------------------------------
+
+  ▶ Action Item Tracker
+  Using AssemblyAI's Action Items model, the platform automatically extracts
+  every commitment made during a meeting — including who made it and any deadline
+  mentioned. Items are assigned to participants by name, appear on a shared
+  dashboard, and send reminders as deadlines approach.
+    • Automatic attribution by speaker using diarisation
+    • Deadline detection from natural language — 'by end of week', 'before Thursday'
+    • Status tracking — open, in progress, completed, overdue
+    • Weekly digest email showing all outstanding items across all meetings
+
+  ▶ Meeting ROI Calculator
+  Every meeting has a real financial cost that most teams never see. Steph
+  estimates this automatically based on attendee roles, number of people on the
+  call, and meeting duration. The ROI is displayed on the meeting summary page.
+    • Cost-per-minute displayed live during the meeting
+    • Monthly meeting cost report per team
+    • Suggestions for converting recurring meetings to async updates
+
+  ▶ Silent Participant Detector
+  Deepgram's speaker diarisation reveals who speaks and who does not. Steph
+  tracks this over time and surfaces engagement insights to team leads.
+    • Per-person speaking time chart visible on the dashboard
+    • Trend alerts: 'Sarah has not spoken in the last 4 team meetings'
+    • Suggested actions: restructure invite list or assign speaking roles
+
+  ▶ Agenda Enforcer
+  Before the meeting, the host uploads or dictates an agenda. Steph tracks how
+  long each item takes in real time and alerts the host when a topic is running
+  over. At the end, a time audit shows how the meeting's duration was spent.
+    • Live topic timer visible only to the host
+    • Automatic topic detection from conversation content
+    • 'Steph, we're moving on' command to log time and advance to the next item
+
+
+--------------------------------------------------------------------------------
+5.  SALES & CLIENT-FACING FEATURES
+--------------------------------------------------------------------------------
+
+  ▶ Objection Library
+  Every time a client raises an objection during a sales call, AssemblyAI's
+  sentiment and key phrase detection flags it. Over time, the platform builds a
+  living objection library — categorised by type, frequency, and the responses
+  that led to positive or negative outcomes.
+    • Objection clustering — groups similar objections across hundreds of calls
+    • Response scoring — links objections to deal outcomes
+    • Rep-specific coaching — shows each rep their personal objection weak spots
+
+  ▶ Deal Sentiment Tracker
+  Using AssemblyAI's Sentiment Analysis, the platform tracks emotional tone of
+  every client interaction over time. A deal that starts warm and grows
+  increasingly negative is flagged automatically.
+    • Sentiment timeline per client relationship
+    • Deal health score updated after every call
+    • Alert: 'Client tone has dropped significantly over the last 3 interactions'
+
+  ▶ Follow-Up Email Drafter
+  The moment a sales call ends, the platform generates a personalised follow-up
+  email using the meeting transcript. It references specific items discussed,
+  summarises agreed next steps, and matches tone to the relationship stage.
+    • Drafted within 60 seconds of call ending
+    • Tone selector — formal, friendly, urgent
+    • Includes only action items relevant to the client — never internal notes
+
+  ▶ Competitive Intelligence Listener
+  When a competitor's name is mentioned during a sales call, Steph flags it and
+  logs it silently. Over time, the platform builds a picture of which competitors
+  come up most often and in what context.
+    • Competitor mention frequency dashboard
+    • Context snippets — what was said around each competitor mention
+    • Alerts when a new competitor name appears for the first time
+
+
+--------------------------------------------------------------------------------
+6.  CONTENT REPURPOSING FEATURES
+--------------------------------------------------------------------------------
+
+  ▶ One Call, Many Formats
+  A single meeting recording is transformed into multiple content formats
+  simultaneously — all generated by Claude using the AssemblyAI transcript.
+    • Blog post — structured article with introduction, sections, and conclusion
+    • LinkedIn update — concise, professional insight post with key takeaway
+    • Newsletter section — formatted for email distribution
+    • Internal memo — formal summary for stakeholders who did not attend
+    • Twitter/X thread — bite-sized insights with a hook and sequential points
+
+  ▶ Podcast Clipper
+  Using AssemblyAI's Auto Chapters and sentiment peaks, the platform identifies
+  the most compelling moments from a long recording for social distribution.
+    • Clip scoring — ranks moments by likely engagement value
+    • One-click export with speaker labels and captions
+
+  ▶ Training Material Builder
+  When a senior team member explains a process or walks a colleague through a
+  system, Steph captures it and converts it into a structured training document
+  that becomes part of the company's onboarding library.
+    • Detects instructional content in meetings automatically
+    • Formats output as a step-by-step guide or FAQ document
+    • Tags the knowledge expert for future reference
+
+
+--------------------------------------------------------------------------------
+7.  KNOWLEDGE MANAGEMENT FEATURES
+--------------------------------------------------------------------------------
+
+  ▶ Institutional Memory Search
+  Every meeting transcript is embedded and stored in a vector database. Any team
+  member can ask a natural language question and receive an exact answer with
+  meeting date, participants, and full context. Powered by AssemblyAI's LeMUR.
+    • Semantic search — finds relevant context even if exact words differ
+    • Source attribution — every answer cites the meeting it came from
+    • Permission-gated — users only see transcripts from meetings they attended
+
+  ▶ Expert Finder
+  Because Deepgram labels every speaker, the platform tracks who speaks
+  authoritatively about which topics — building an internal directory of expertise
+  without anyone having to self-report.
+    • Auto-generated expertise profiles per team member
+    • Searchable by topic: 'Who knows the most about our EMEA contracts?'
+    • Useful for onboarding — connect new hires with the right internal expert
+
+  ▶ Decision Log
+  Every key decision made across all calls is automatically identified, logged,
+  and stored in a searchable, chronological decision log.
+    • Decision confidence scoring — high/medium/tentative based on language
+    • Decision threads — link follow-up meetings that revisit the same decision
+    • Export as PDF for governance, compliance, or board reporting
+
+
+--------------------------------------------------------------------------------
+8.  PRODUCTIVITY & WELLNESS FEATURES
+--------------------------------------------------------------------------------
+
+  ▶ Focus Time Protector
+  Analyses each user's meeting load and identifies days where back-to-back
+  meetings leave no time for focused work. Surfaces insights and suggests
+  meeting-free blocks or async alternatives.
+    • Weekly focus time score
+    • 'Meeting-heavy days' alert with suggested restructuring
+
+  ▶ Burnout Signal Monitor
+  Using AssemblyAI's sentiment analysis applied across weeks and months, the
+  platform detects sustained negative sentiment or growing frustration in language
+  patterns — giving managers a data-backed early warning system.
+    • Individual and team-level sentiment trends over time
+    • Private alerts to managers only — never exposed without consent
+
+  ▶ Async Meeting Mode
+  Participants can submit a voice response to a meeting summary instead of
+  attending live. Steph compiles all async responses into a combined update.
+    • Voice or text async responses accepted
+    • Steph reads all async contributions aloud at the start of the live session
+    • Response deadline enforced — late responses flagged automatically
+
+
+================================================================================
+                       PART C — THE FLAGSHIP: STEPH
+================================================================================
+
+--------------------------------------------------------------------------------
+9.  AI CHIEF OF STAFF — THE CORE VISION
+--------------------------------------------------------------------------------
+
+The AI Chief of Staff is not a feature — it is the product's central identity.
+Every other capability feeds into it. The Chief of Staff layer sits across all
+of a user's meetings, documents, emails, and calendar, and behaves like a senior
+executive assistant with perfect memory and always-on availability.
+
+Critically, the Chief of Staff does not wait to be asked. It is proactive by
+design. It surfaces the right information at the right moment — before a meeting,
+during a call, or in a morning briefing — without the user having to dig for it.
+
+  ▶ Pre-Meeting Briefings
+  15 minutes before any calendar meeting, Steph delivers a personalised brief:
+  who is attending, what was discussed in previous meetings with these people,
+  any open action items from the last session, relevant documents uploaded by
+  attendees, and suggested talking points.
+
+  ▶ Commitment Tracking Across All Meetings
+  Every promise made in any meeting is tracked — regardless of which meeting it
+  came from. Both appear in the user's personal commitment dashboard with
+  deadlines and status. Crucially, CEO meeting commitments and sales meeting
+  commitments are tracked in separate, isolated threads.
+
+  ▶ Pattern Detection
+  Over weeks and months, the platform identifies patterns that no human would
+  notice manually: a decision deferred four times, a vendor repeatedly mentioned
+  but never actioned, a recurring conflict in every planning meeting.
+
+  ▶ Daily Intelligence Briefing
+  Each morning, Steph delivers a 2-minute audio or text briefing: today's
+  meetings and what you need to know for each, overdue action items, risks flagged
+  from yesterday's meetings, and one strategic observation from the past week.
+
+  ▶ Difficult Conversation Preparation
+  Based on historical sentiment data, Steph identifies when a client relationship
+  is deteriorating. Before the next call, it briefs the host on what changed,
+  what the likely concern is, and how to approach the conversation.
+
+
+--------------------------------------------------------------------------------
+10. MEETING CONTEXT ISOLATION — CRITICAL DESIGN PRINCIPLE
+--------------------------------------------------------------------------------
+
+This is one of the most important design decisions in the entire platform. A user
+will have multiple recurring meetings of entirely different natures — a weekly
+sales review, a developer standup, a CEO check-in, a client call, a board
+preparation session. Each of these is a separate context with separate history,
+participants, and sensitive information.
+
+  !! CRITICAL WARNING !!
+  If Steph ever references information from the wrong meeting — mentioning a
+  sales pipeline number during a CEO meeting, or a hiring discussion during a
+  client call — the host loses trust in the platform immediately. Context
+  contamination is a trust-destroying bug, not just a minor error. This must
+  be architected correctly from day one.
+
+HOW MEETING CONTEXT ISOLATION WORKS:
+
+Every meeting is assigned to a Meeting Thread — a persistent, named context that
+groups all sessions involving the same recurring group of people. Steph builds
+and maintains each thread independently, and never crosses threads unless the
+host explicitly requests it.
+
+Thread Identification — How Steph Knows Which Thread It Is In:
+  • Participant fingerprint — the unique combination of attendees is the primary
+    identifier
+  • Calendar event link — the event ID anchors the thread if calendar-integrated
+  • Recurring pattern — same participants, same day/time are auto-grouped
+  • Topic fingerprinting — AssemblyAI's Auto Chapters verify meeting type if
+    the participant list is ambiguous
+  • Host confirmation — on first detection, Steph asks the host to confirm and
+    name the thread (e.g. 'Sales Weekly')
+
+Thread Memory Rules:
+  Rule                  | Behaviour
+  ----------------------|------------------------------------------------------
+  Default scope         | Steph only recalls history from the current thread
+  Cross-thread recall   | Only triggered when host explicitly asks for it
+  Permission control    | Host can lock threads — preventing cross-referencing
+  New participant joins | Steph does not volunteer historical context to new attendees
+  Guest attendees       | External guests trigger restricted mode — no internal history
+
+  SCENARIO — CEO Meeting in Progress:
+  The host is in a CEO check-in. Earlier that day they had a sales meeting where
+  the team discussed a sensitive deal falling apart. The CEO asks about Q2
+  pipeline health. Steph does NOT volunteer information from the sales meeting.
+  She responds only from data the CEO meeting thread has. The host can say
+  'Steph, also check the sales thread' to explicitly authorise the cross-reference.
+
+Meeting Thread Dashboard — Example:
+  Thread Name       | Participants        | Sessions | Open Actions | Status
+  ------------------|---------------------|----------|--------------|------------------
+  Sales Weekly      | Sales Team (6)      | 24       | 3            | Active
+  Dev Standup       | Engineering (8)     | 48       | 7            | Active
+  CEO Check-in      | CEO + You           | 12       | 1            | Active — Locked
+  Client: Acme Corp | External + You      | 6        | 2            | Active — Restricted
+  Board Prep Q2     | Exec Team (4)       | 3        | 5            | Active — Locked
+
+
+--------------------------------------------------------------------------------
+11. PREVIOUS MEETING CONTINUITY
+--------------------------------------------------------------------------------
+
+When Steph detects that a meeting belongs to a known thread, she automatically
+prepares a 'Last Time' briefing — a concise recap of what happened in the
+previous session of that specific thread. The host can trigger this briefing to
+be read aloud to the room at the start of the meeting, creating instant
+accountability with no effort.
+
+What the Continuity Briefing Contains:
+  • Summary of the last session's key decisions — in plain, spoken language
+  • Action items from last time — listed by owner with status
+  • Deferred items — topics that were raised but explicitly postponed
+  • Attendance note — flagging if someone new has joined or a regular is absent
+  • Time since last meeting — 'This is your 8th session, 7 days since your last.'
+
+  SCENARIO — Sales Weekly Opening:
+  Host presses 'Read Last Minutes' on the control panel. Steph says:
+  'Good morning. Welcome to your 24th Sales Weekly. Last Tuesday, the team
+  discussed three main topics: the Acme Corp proposal, the Q2 target gap, and
+  the new CRM rollout timeline. Three action items were raised. Marcus was to
+  send the revised proposal to Acme by Friday — that has been marked complete.
+  Priya was to pull the Q2 forecast numbers — still open. The CRM timeline
+  decision was deferred to today. You have 45 minutes scheduled. Shall we begin?'
+
+Thread Timeline View:
+Beyond individual session continuity, the platform provides a full Thread
+Timeline — a visual history of every session in a meeting thread, showing how
+topics, decisions, and team dynamics have evolved over weeks and months. Leaders
+can scroll back through a year of CEO check-ins and see exactly when strategic
+priorities shifted.
+
+
+--------------------------------------------------------------------------------
+12. STEPH — IDENTITY, VOICE & PERSONALISATION
+--------------------------------------------------------------------------------
+
+Steph is not a generic assistant — she is a named, voiced, personalised team
+member. The default name is Steph, but every user can rename their bot from the
+dashboard. When renamed, the bot responds exclusively to the new name — both as
+a voice command trigger and as how she introduces herself when joining a call.
+
+  "Teams will start saying 'let's ask Steph' naturally in meetings.
+   That familiarity is the product's best retention mechanism.
+   Switching platforms means losing Steph's memory — and that is a
+   loss no team wants to take."
+
+Dashboard Personalisation Settings:
+  Setting           | Default        | Options
+  ------------------|----------------|------------------------------------------
+  Bot Name          | Steph          | Any name — Max, Nova, Aria, Alex, custom
+  Voice Gender      | Female         | Female / Male / Neutral
+  Voice Style       | Professional   | Professional / Friendly / Academic / Concise
+  Personality       | Balanced       | Slider: Direct & Concise <-> Warm & Conversational
+  Response Length   | Medium         | Brief (1-2 sentences) / Medium / Detailed
+  Language          | English        | Multilingual — 30+ languages via Deepgram
+  Trigger Access    | Host Only      | Host Only / All Participants / Custom
+  Join Behaviour    | Silent         | Silent until called / Intro announcement on join
+  Call Platform     | All            | Zoom / Google Meet / Teams / Phone / Custom
+
+When a user renames their bot, all voice commands, calendar integrations, and
+notification messages update automatically to use the new name.
+
+
+--------------------------------------------------------------------------------
+13. VOICE ACTIVATION & WAKE WORD INTELLIGENCE
+--------------------------------------------------------------------------------
+
+Steph listens passively using Deepgram's real-time streaming API throughout every
+call. She remains completely silent until her name is spoken — at which point she
+activates, processes the request, and responds within 1-2 seconds.
+
+Wake Word Detection Logic:
+  • Deepgram streams audio continuously via WebSocket during the call
+  • A lightweight pattern matcher scans the transcript stream for the bot's name
+  • Detection confidence threshold is set high to avoid false positives
+  • Two-second confirmation window — if no follow-up command is detected, Steph
+    does not activate
+  • Name collision handling — if someone on the call shares the bot's name, the
+    system uses context and intonation to distinguish a command from a reference
+  • The host can also trigger Steph via the silent control panel without speaking,
+    giving full fallback control
+
+Activation Flow — Step by Step:
+  Step | What Happens                                          | Technology
+  -----|-------------------------------------------------------|----------------------
+  1    | Deepgram streams audio from the call in real time    | Deepgram WebSocket STT
+  2    | Bot name is identified in the transcript stream      | Pattern match on tokens
+  3    | System waits up to 2 seconds for a command to follow | Buffer logic
+  4    | Full command is transcribed and parsed               | Deepgram + NLP
+  5    | Claude processes the command against memory/context  | Claude API
+  6    | A natural spoken response is generated               | ElevenLabs TTS
+  7    | Response plays through Steph's audio stream          | WebRTC audio injection
+  8    | Steph returns to silent listening mode               | Deepgram resumes stream
+
+
+--------------------------------------------------------------------------------
+14. REAL-TIME VOICE INTERACTION MODES
+--------------------------------------------------------------------------------
+
+When activated, Steph can operate in several distinct modes depending on what
+the host needs. Each mode is accessible via voice command or the control panel.
+
+  ▶ Public Mode — Speaks to the Room
+  Steph speaks aloud and all participants hear her. Used for reading minutes,
+  answering factual questions, or delivering a contribution to the full group.
+  This is the default mode when the host triggers Steph.
+    • Reading last meeting minutes to open the session
+    • Answering a factual question raised by any participant
+    • Delivering a data point or document reference on request
+    • Time-keeping announcements — 'You have 5 minutes left on this topic'
+
+  ▶ Silent Co-Pilot Mode — Speaks Only to the Host
+  Steph's audio is routed only to the host through a private earpiece or headphone
+  channel. The rest of the room hears nothing. This allows the host to receive
+  real-time coaching and warnings during a high-stakes conversation.
+    • Sentiment warning: 'The client's tone has shifted — consider pausing'
+    • Negotiation cue: 'This is the third time price has come up'
+    • Fact retrieval: 'The figure you're looking for is $2.4M — from the March deck'
+    • Time warning: 'You have 8 minutes left and contract terms haven't been discussed'
+
+  ▶ Devil's Advocate Mode
+  The host sets Steph to challenge whatever proposal is on the table. Steph
+  presents the strongest counter-argument to the current idea — helping the team
+  stress-test decisions before committing.
+    • Host activates via control panel before or during discussion
+    • Steph's challenge is based on data from past meetings and LLM reasoning
+    • 'Steph, challenge this plan' triggers an immediate structured counter-argument
+
+  ▶ Neutral Mediator Mode
+  When two participants disagree and the discussion becomes circular, the host
+  invokes Steph as a neutral party. She synthesises both positions, identifies
+  the core point of disagreement, and presents an objective perspective.
+    • Summarises both sides of the disagreement without bias
+    • Identifies the specific factual question that would resolve the disagreement
+    • Suggests a decision framework if the data is ambiguous
+
+
+--------------------------------------------------------------------------------
+15. HOST CONTROL PANEL
+--------------------------------------------------------------------------------
+
+The host has exclusive access to a real-time control panel — a floating sidebar
+on desktop or a companion mobile app that only they can see. This is the command
+centre for Steph during a live meeting.
+
+Control Panel Capabilities:
+  • One-tap trigger for any Steph action — no need to speak aloud
+  • Interrupt button — stops Steph mid-sentence immediately if untimely
+  • Mode switcher — toggle between Public, Silent Co-Pilot, Devil's Advocate,
+    Mediator
+  • Timed queue — schedule an announcement for Steph to deliver at a set time
+  • Private question field — type a question; choose ear-only or aloud
+  • Participant permissions toggle — grant or revoke other participants' ability
+    to call Steph
+  • Live transcript view — see the rolling transcript in real time
+  • Action item flag — tap to mark any spoken statement as an action item
+  • Thread selector — confirm or switch which Meeting Thread this session belongs
+  • End meeting button — triggers Steph to wrap up and send the summary
+
+Full Voice Command Reference:
+  Voice Command                        | Steph's Action                          | Audience
+  -------------------------------------|------------------------------------------|----------
+  "[Name], read last minutes"          | Reads previous session summary aloud     | Room
+  "[Name], what was decided about X?"  | Retrieves specific decision from history  | Room
+  "[Name], who owns this action?"      | Attributes ownership from context         | Room
+  "[Name], what do you think?"         | Gives data-backed contribution            | Room
+  "[Name], challenge this"             | Activates Devil's Advocate mode           | Room
+  "[Name], how long on this topic?"    | Reports time elapsed on current item      | Room
+  "[Name], take a note"                | Logs the following words as a key note    | Internal
+  "[Name], go silent"                  | Mutes until explicitly called again       | Internal
+  "[Name], switch to co-pilot"         | Activates Silent Co-Pilot mode            | Host only
+  "[Name], summarise so far"           | Summarises meeting to current point       | Room
+  "[Name], end the meeting"            | Wraps up and sends summary to all         | Room
+
+
+--------------------------------------------------------------------------------
+16. STEPH AS AN INTELLIGENT CONTRIBUTOR
+--------------------------------------------------------------------------------
+
+Beyond commands and memory retrieval, Steph can function as a genuine
+intellectual contributor to the conversation. When a complex question is raised
+and the host invites her opinion, Steph synthesises information from multiple
+sources to give a structured, useful response in real time.
+
+Sources Steph draws from when contributing:
+  Source                  | What Steph Retrieves                               | Scope
+  ------------------------|----------------------------------------------------|-------------------
+  Meeting Thread History  | Decisions, context, commitments from past sessions | Current thread only
+  Uploaded Documents      | Data, figures, policies from thread files          | Thread-specific
+  Cross-Thread (request)  | Context from other threads when host authorises    | Explicit request
+  LLM Reasoning           | Synthesised analysis, frameworks, opinions         | Always available
+  Web Search (optional)   | Current market data, news, benchmarks              | When enabled
+
+  SCENARIO — Business Expansion Question:
+  A startup team is debating whether to expand to a new market. Someone asks:
+  'Do we actually have the capacity to do this?' The host says: 'Steph, what do
+  you think?'
+
+  Steph responds: 'Based on the resource planning document uploaded on March 4th
+  and the hiring timeline discussed in your last Dev Standup, the team would be
+  understaffed by approximately 3 roles to execute this expansion before Q3.
+  Marcus raised this capacity concern in the February 18th planning session but
+  it was deferred. The current open roles in the hiring tracker have an estimated
+  8-week fill time, which puts first hires in late Q2 at the earliest. Would you
+  like me to outline what a delayed expansion timeline would look like?'
+
+This response demonstrates the platform's true value: not just retrieving a fact,
+but connecting data across documents, past meetings, and logical reasoning — all
+in under 3 seconds.
+
+
+================================================================================
+                              PART D — STRATEGY
+================================================================================
+
+--------------------------------------------------------------------------------
+17. PHASED BUILD ROADMAP
+--------------------------------------------------------------------------------
+
+  ── PHASE 1 — FOUNDATION (Months 1–3) ─────────────────────────────────────────
+  • PDF to Audio with summary layering and voice selection (ElevenLabs TTS)
+  • Meeting transcription using Deepgram real-time STT
+  • Post-call processing with AssemblyAI — action items, summary, sentiment
+  • Meeting Thread system — context isolation and thread management dashboard
+  • Previous meeting continuity briefing — host-triggered read-aloud
+  • Action Item Tracker with assignment and deadline detection
+
+  ── PHASE 2 — INTELLIGENCE (Months 4–6) ───────────────────────────────────────
+  • AI Chief of Staff layer — daily briefing, commitment tracking, pattern detection
+  • Pre-meeting brief delivered 15 minutes before each calendar event
+  • Institutional Memory Search — semantic search across all thread transcripts
+  • Deal Sentiment Tracker and Objection Library for sales users
+  • Silent Participant Detector and Meeting ROI Calculator
+  • Content Repurposing — One Call Many Formats, Training Material Builder
+
+  ── PHASE 3 — STEPH LIVE (Months 7–10) ────────────────────────────────────────
+  • Steph joins calls as a named voice participant via WebRTC audio injection
+  • Wake word detection using Deepgram streaming — responds to custom bot name
+  • Host Control Panel — floating sidebar with full command interface
+  • Public, Silent Co-Pilot, Devil's Advocate, and Mediator interaction modes
+  • Cross-thread recall on explicit host authorisation
+  • Dashboard bot personalisation — name, voice, personality, language, permissions
+
+  ── PHASE 4 — AUTONOMY (Months 11+) ───────────────────────────────────────────
+  • Autonomous Steph for routine calls — customer support, intake, scheduling
+  • Full escalation logic — handles the call, pulls in a human when stuck
+  • Multi-Steph deployment — enterprise teams with dedicated bots per department
+  • Steph API — allow businesses to embed Steph in their own meeting platforms
+
+
+--------------------------------------------------------------------------------
+18. COMPETITIVE POSITIONING
+--------------------------------------------------------------------------------
+
+  Platform       | What They Do Well                   | What They Lack                     | Steph's Advantage
+  ---------------|-------------------------------------|------------------------------------|---------------------------
+  Fireflies.ai   | Transcription, search, summary      | No live voice bot, no isolation    | Live voice + thread isolation
+  Otter.ai       | Real-time captions, collaboration   | No intelligence layer, no bot      | Chief of Staff + proactive
+  Gong.io        | Sales call intelligence, coaching   | Sales only, expensive, no live bot | Cross-functional + live Steph
+  Chorus.ai      | Revenue intelligence, CRM sync      | Sales only, no live participation  | Broader use + live presence
+  Notion AI      | Document intelligence, writing      | Not meeting-focused, no voice bot  | Real-time meeting + memory
+
+  "Steph's moat is the combination of meeting context isolation + live voice
+   participation + the AI Chief of Staff intelligence layer. No existing platform
+   offers all three. That combination is very difficult to replicate quickly and
+   creates genuine switching costs."
+
+
+--------------------------------------------------------------------------------
+19. MONETISATION CONSIDERATIONS
+--------------------------------------------------------------------------------
+
+The platform's feature depth supports a tiered SaaS model with clear upgrade
+incentives at each level.
+
+  Tier          | Price Signal | Key Features Included
+  --------------|--------------|------------------------------------------------------
+  Starter       | Free / Low   | PDF to Audio, basic transcription, 1 thread, 5hr/month
+  Professional  | Mid          | AI Chief of Staff, unlimited threads, context isolation
+  Team          | Per seat     | Full Steph bot, host control panel, sentiment tracking
+  Enterprise    | Custom       | Custom bot per dept, API access, SSO, compliance, Steph API
+
+Key monetisation notes:
+  • Deepgram and AssemblyAI have usage-based costs — pass through a margin on
+    audio processing hours at higher tiers
+  • ElevenLabs TTS has character limits at lower pricing tiers — factor into
+    PDF to Audio limits per plan
+  • The live Steph bot (WebRTC + real-time STT + TTS) is the most expensive
+    feature to run — reserve for Team tier and above
+  • Thread storage and vector search costs scale with usage — archive old threads
+    after 12 months at Starter tier
+  • Enterprise clients will pay significant premiums for the Steph API to embed
+    the bot in their own internal tools
+
+  "The product's greatest commercial asset is switching cost. Once a team has
+   6 months of meeting thread history, action item records, and institutional
+   memory stored in Steph — leaving means starting over.
+   Build for depth from day one."
+
+
+================================================================================
+                    END OF REPORT — STEPH PLATFORM v2.0
+                    Confidential | Not for external distribution
+================================================================================

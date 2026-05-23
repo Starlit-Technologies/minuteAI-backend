@@ -45,6 +45,7 @@ _GOOGLE_AUTH_URL      = "https://accounts.google.com/o/oauth2/v2/auth"
 _GOOGLE_TOKEN_URL     = "https://oauth2.googleapis.com/token"
 _GOOGLE_CALENDAR_URL  = "https://www.googleapis.com/calendar/v3/calendars/primary/events"
 _GOOGLE_SCOPES        = "openid email https://www.googleapis.com/auth/calendar.readonly"
+_GOOGLE_DRIVE_SCOPES  = "openid email https://www.googleapis.com/auth/drive.file"
 
 _ZOOM_AUTH_URL  = "https://zoom.us/oauth/authorize"
 _ZOOM_TOKEN_URL = "https://zoom.us/oauth/token"
@@ -91,6 +92,19 @@ class IntegrationSettingsIn(BaseModel):
     url: Optional[str] = None           # Webhook
 
 
+class RoutingDestination(BaseModel):
+    id: str
+    name: str
+    webhook_url: str
+    categories: list[str] = []
+    keywords: list[str] = []
+    is_default: bool = False
+
+
+class RoutingBody(BaseModel):
+    destinations: list[RoutingDestination]
+
+
 class WebhookConnectBody(BaseModel):
     url: str
 
@@ -135,10 +149,10 @@ def callback_google(code: str = None, state: str = None, error: str = None):
     base = (decoded or {}).get("origin") or FRONTEND_URL
 
     if error or not code or not state:
-        return RedirectResponse(f"{base}/settings?tab=integrations&error=google_denied")
+        return RedirectResponse(f"{base}/integrations?error=google_denied")
 
     if not decoded:
-        return RedirectResponse(f"{base}/settings?tab=integrations&error=invalid_state")
+        return RedirectResponse(f"{base}/integrations?error=invalid_state")
 
     user_id = decoded["user_id"]
 
@@ -150,7 +164,7 @@ def callback_google(code: str = None, state: str = None, error: str = None):
         "grant_type": "authorization_code",
     })
     if not token_res.ok:
-        return RedirectResponse(f"{base}/settings?tab=integrations&error=google_token")
+        return RedirectResponse(f"{base}/integrations?error=google_token")
 
     tokens = token_res.json()
     access_token  = tokens["access_token"]
@@ -170,7 +184,7 @@ def callback_google(code: str = None, state: str = None, error: str = None):
         access_token=access_token, refresh_token=refresh_token,
         token_expiry=expiry, email=email,
     )
-    return RedirectResponse(f"{base}/settings?tab=integrations&connected=google")
+    return RedirectResponse(f"{base}/integrations?connected=google")
 
 
 # ── Zoom ──────────────────────────────────────────────────────────────────────
@@ -182,6 +196,7 @@ def connect_zoom(origin: str = Query(default=""), user: User = Depends(get_curre
         "client_id": ZOOM_CLIENT_ID,
         "redirect_uri": f"{BACKEND_URL}/integrations/callback/zoom",
         "response_type": "code",
+        "scope": "meeting:read user:read",
         "state": state,
     }
     return {"url": f"{_ZOOM_AUTH_URL}?{urllib.parse.urlencode(params)}"}
@@ -193,10 +208,10 @@ def callback_zoom(code: str = None, state: str = None, error: str = None):
     base = (decoded or {}).get("origin") or FRONTEND_URL
 
     if error or not code or not state:
-        return RedirectResponse(f"{base}/settings?tab=integrations&error=zoom_denied")
+        return RedirectResponse(f"{base}/integrations?error=zoom_denied")
 
     if not decoded:
-        return RedirectResponse(f"{base}/settings?tab=integrations&error=invalid_state")
+        return RedirectResponse(f"{base}/integrations?error=invalid_state")
 
     user_id = decoded["user_id"]
 
@@ -211,7 +226,7 @@ def callback_zoom(code: str = None, state: str = None, error: str = None):
         },
     )
     if not token_res.ok:
-        return RedirectResponse(f"{base}/settings?tab=integrations&error=zoom_token")
+        return RedirectResponse(f"{base}/integrations?error=zoom_token")
 
     tokens = token_res.json()
     access_token  = tokens["access_token"]
@@ -231,7 +246,7 @@ def callback_zoom(code: str = None, state: str = None, error: str = None):
         access_token=access_token, refresh_token=refresh_token,
         token_expiry=expiry, email=email,
     )
-    return RedirectResponse(f"{base}/settings?tab=integrations&connected=zoom")
+    return RedirectResponse(f"{base}/integrations?connected=zoom")
 
 
 # ── Slack ─────────────────────────────────────────────────────────────────────
@@ -254,10 +269,10 @@ def callback_slack(code: str = None, state: str = None, error: str = None):
     base = (decoded or {}).get("origin") or FRONTEND_URL
 
     if error or not code or not state:
-        return RedirectResponse(f"{base}/settings?tab=integrations&error=slack_denied")
+        return RedirectResponse(f"{base}/integrations?error=slack_denied")
 
     if not decoded:
-        return RedirectResponse(f"{base}/settings?tab=integrations&error=invalid_state")
+        return RedirectResponse(f"{base}/integrations?error=invalid_state")
 
     user_id = decoded["user_id"]
 
@@ -272,11 +287,11 @@ def callback_slack(code: str = None, state: str = None, error: str = None):
         },
     )
     if not token_res.ok:
-        return RedirectResponse(f"{base}/settings?tab=integrations&error=slack_token")
+        return RedirectResponse(f"{base}/integrations?error=slack_token")
 
     tokens = token_res.json()
     if not tokens.get("ok"):
-        return RedirectResponse(f"{base}/settings?tab=integrations&error=slack_token")
+        return RedirectResponse(f"{base}/integrations?error=slack_token")
 
     access_token = tokens["access_token"]
     webhook = tokens.get("incoming_webhook", {})
@@ -293,7 +308,7 @@ def callback_slack(code: str = None, state: str = None, error: str = None):
         token_expiry=None, email=email,
         settings=settings,
     )
-    return RedirectResponse(f"{base}/settings?tab=integrations&connected=slack")
+    return RedirectResponse(f"{base}/integrations?connected=slack")
 
 
 # ── Notion ────────────────────────────────────────────────────────────────────
@@ -316,10 +331,10 @@ def callback_notion(code: str = None, state: str = None, error: str = None):
     base = (decoded or {}).get("origin") or FRONTEND_URL
 
     if error or not code or not state:
-        return RedirectResponse(f"{base}/settings?tab=integrations&error=notion_denied")
+        return RedirectResponse(f"{base}/integrations?error=notion_denied")
 
     if not decoded:
-        return RedirectResponse(f"{base}/settings?tab=integrations&error=invalid_state")
+        return RedirectResponse(f"{base}/integrations?error=invalid_state")
 
     user_id = decoded["user_id"]
 
@@ -337,7 +352,7 @@ def callback_notion(code: str = None, state: str = None, error: str = None):
         },
     )
     if not token_res.ok:
-        return RedirectResponse(f"{base}/settings?tab=integrations&error=notion_token")
+        return RedirectResponse(f"{base}/integrations?error=notion_token")
 
     tokens = token_res.json()
     access_token = tokens["access_token"]
@@ -353,7 +368,7 @@ def callback_notion(code: str = None, state: str = None, error: str = None):
         access_token=access_token, refresh_token=None,
         token_expiry=None, email=email,
     )
-    return RedirectResponse(f"{base}/settings?tab=integrations&connected=notion")
+    return RedirectResponse(f"{base}/integrations?connected=notion")
 
 
 # ── HubSpot ───────────────────────────────────────────────────────────────────
@@ -376,10 +391,10 @@ def callback_hubspot(code: str = None, state: str = None, error: str = None):
     base = (decoded or {}).get("origin") or FRONTEND_URL
 
     if error or not code or not state:
-        return RedirectResponse(f"{base}/settings?tab=integrations&error=hubspot_denied")
+        return RedirectResponse(f"{base}/integrations?error=hubspot_denied")
 
     if not decoded:
-        return RedirectResponse(f"{base}/settings?tab=integrations&error=invalid_state")
+        return RedirectResponse(f"{base}/integrations?error=invalid_state")
 
     user_id = decoded["user_id"]
 
@@ -394,7 +409,7 @@ def callback_hubspot(code: str = None, state: str = None, error: str = None):
         },
     )
     if not token_res.ok:
-        return RedirectResponse(f"{base}/settings?tab=integrations&error=hubspot_token")
+        return RedirectResponse(f"{base}/integrations?error=hubspot_token")
 
     tokens = token_res.json()
     access_token  = tokens["access_token"]
@@ -411,7 +426,7 @@ def callback_hubspot(code: str = None, state: str = None, error: str = None):
         access_token=access_token, refresh_token=refresh_token,
         token_expiry=expiry, email=email,
     )
-    return RedirectResponse(f"{base}/settings?tab=integrations&connected=hubspot")
+    return RedirectResponse(f"{base}/integrations?connected=hubspot")
 
 
 # ── Linear ────────────────────────────────────────────────────────────────────
@@ -435,10 +450,10 @@ def callback_linear(code: str = None, state: str = None, error: str = None):
     base = (decoded or {}).get("origin") or FRONTEND_URL
 
     if error or not code or not state:
-        return RedirectResponse(f"{base}/settings?tab=integrations&error=linear_denied")
+        return RedirectResponse(f"{base}/integrations?error=linear_denied")
 
     if not decoded:
-        return RedirectResponse(f"{base}/settings?tab=integrations&error=invalid_state")
+        return RedirectResponse(f"{base}/integrations?error=invalid_state")
 
     user_id = decoded["user_id"]
 
@@ -453,7 +468,7 @@ def callback_linear(code: str = None, state: str = None, error: str = None):
         },
     )
     if not token_res.ok:
-        return RedirectResponse(f"{base}/settings?tab=integrations&error=linear_token")
+        return RedirectResponse(f"{base}/integrations?error=linear_token")
 
     tokens = token_res.json()
     access_token  = tokens["access_token"]
@@ -490,7 +505,7 @@ def callback_linear(code: str = None, state: str = None, error: str = None):
         token_expiry=expiry, email=email,
         settings=settings,
     )
-    return RedirectResponse(f"{base}/settings?tab=integrations&connected=linear")
+    return RedirectResponse(f"{base}/integrations?connected=linear")
 
 
 # ── Outlook (Microsoft) ───────────────────────────────────────────────────────
@@ -514,10 +529,10 @@ def callback_outlook(code: str = None, state: str = None, error: str = None):
     base = (decoded or {}).get("origin") or FRONTEND_URL
 
     if error or not code or not state:
-        return RedirectResponse(f"{base}/settings?tab=integrations&error=outlook_denied")
+        return RedirectResponse(f"{base}/integrations?error=outlook_denied")
 
     if not decoded:
-        return RedirectResponse(f"{base}/settings?tab=integrations&error=invalid_state")
+        return RedirectResponse(f"{base}/integrations?error=invalid_state")
 
     user_id = decoded["user_id"]
 
@@ -533,7 +548,7 @@ def callback_outlook(code: str = None, state: str = None, error: str = None):
         },
     )
     if not token_res.ok:
-        return RedirectResponse(f"{base}/settings?tab=integrations&error=outlook_token")
+        return RedirectResponse(f"{base}/integrations?error=outlook_token")
 
     tokens = token_res.json()
     access_token  = tokens["access_token"]
@@ -554,7 +569,68 @@ def callback_outlook(code: str = None, state: str = None, error: str = None):
         access_token=access_token, refresh_token=refresh_token,
         token_expiry=expiry, email=email,
     )
-    return RedirectResponse(f"{base}/settings?tab=integrations&connected=outlook")
+    return RedirectResponse(f"{base}/integrations?connected=outlook")
+
+
+# ── Google Drive ──────────────────────────────────────────────────────────────
+
+@router.get("/connect/google_drive")
+def connect_google_drive(origin: str = Query(default=""), user: User = Depends(get_current_user)):
+    state = _make_state(user.id, origin)
+    params = {
+        "client_id": GOOGLE_CLIENT_ID,
+        "redirect_uri": f"{BACKEND_URL}/integrations/callback/google_drive",
+        "response_type": "code",
+        "scope": _GOOGLE_DRIVE_SCOPES,
+        "access_type": "offline",
+        "prompt": "consent",
+        "state": state,
+    }
+    return {"url": f"{_GOOGLE_AUTH_URL}?{urllib.parse.urlencode(params)}"}
+
+
+@router.get("/callback/google_drive")
+def callback_google_drive(code: str = None, state: str = None, error: str = None):
+    decoded = _decode_state(state) if state else None
+    base = (decoded or {}).get("origin") or FRONTEND_URL
+
+    if error or not code or not state:
+        return RedirectResponse(f"{base}/integrations?error=google_drive_denied")
+
+    if not decoded:
+        return RedirectResponse(f"{base}/integrations?error=invalid_state")
+
+    user_id = decoded["user_id"]
+
+    token_res = requests.post(_GOOGLE_TOKEN_URL, data={
+        "code": code,
+        "client_id": GOOGLE_CLIENT_ID,
+        "client_secret": GOOGLE_CLIENT_SECRET,
+        "redirect_uri": f"{BACKEND_URL}/integrations/callback/google_drive",
+        "grant_type": "authorization_code",
+    })
+    if not token_res.ok:
+        return RedirectResponse(f"{base}/integrations?error=google_drive_token")
+
+    tokens = token_res.json()
+    access_token  = tokens["access_token"]
+    refresh_token = tokens.get("refresh_token")
+    expiry        = datetime.utcnow() + timedelta(seconds=tokens.get("expires_in", 3600))
+
+    email = None
+    info_res = requests.get(
+        "https://www.googleapis.com/oauth2/v2/userinfo",
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+    if info_res.ok:
+        email = info_res.json().get("email")
+
+    upsert_connected_account(
+        user_id=user_id, provider="google_drive",
+        access_token=access_token, refresh_token=refresh_token,
+        token_expiry=expiry, email=email,
+    )
+    return RedirectResponse(f"{base}/integrations?connected=google_drive")
 
 
 # ── Webhook (no OAuth) ────────────────────────────────────────────────────────
@@ -581,6 +657,17 @@ def update_settings(provider: str, body: IntegrationSettingsIn, user: User = Dep
     if not account:
         raise HTTPException(404, "Integration not connected")
     return {"ok": True, "settings": account.settings}
+
+
+@router.put("/{provider}/routing")
+def update_routing(provider: str, body: RoutingBody, user: User = Depends(get_current_user)):
+    """Save multi-destination routing rules for an integration."""
+    account = get_connected_account(user.id, provider)
+    if not account:
+        raise HTTPException(404, "Integration not connected")
+    destinations = [d.dict() for d in body.destinations]
+    account = update_integration_settings(user.id, provider, {"destinations": destinations})
+    return {"ok": True, "destinations": destinations}
 
 
 @router.get("/{provider}/resources")

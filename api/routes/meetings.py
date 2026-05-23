@@ -21,7 +21,26 @@ def list_meetings(
     if workspace_id:
         q = q.filter(JobRecord.workspace_id == workspace_id)
     records = q.order_by(JobRecord.created_at.desc()).all()
-    return [job_to_dict(r) for r in records]
+
+    # Batch-load thread info so we can show category on each meeting card
+    from models.meeting_thread import ThreadSessionRecord, MeetingThreadRecord
+    job_ids = [r.id for r in records]
+    thread_map: dict[str, dict] = {}
+    if job_ids:
+        sessions = db.query(ThreadSessionRecord).filter(
+            ThreadSessionRecord.job_id.in_(job_ids)
+        ).all()
+        thread_ids = list({s.thread_id for s in sessions})
+        threads = db.query(MeetingThreadRecord).filter(
+            MeetingThreadRecord.id.in_(thread_ids)
+        ).all()
+        threads_by_id = {t.id: t for t in threads}
+        for s in sessions:
+            t = threads_by_id.get(s.thread_id)
+            if t:
+                thread_map[s.job_id] = {"name": t.name, "category": t.category}
+
+    return [job_to_dict(r, thread_map.get(r.id)) for r in records]
 
 
 @router.get("/stats")

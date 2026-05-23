@@ -39,10 +39,10 @@ def _audio_type(record: JobRecord) -> str | None:
     return "audio"  # default for unknown
 
 
-def job_to_dict(record: JobRecord) -> dict:
+def job_to_dict(record: JobRecord, thread_info: dict | None = None) -> dict:
     meta = parse_meta(record) if record.status == "done" else {}
     has_audio = bool(getattr(record, "audio_path", None) or getattr(record, "r2_audio_key", None))
-    return {
+    result = {
         "id":           record.id,
         "title":        meta.get("title", "Processing…") if meta else "Processing…",
         "date":         (record.created_at.isoformat() + "Z") if record.created_at else None,
@@ -55,6 +55,10 @@ def job_to_dict(record: JobRecord) -> dict:
         "has_audio":    has_audio,
         "audio_type":   _audio_type(record) if has_audio else None,
     }
+    if thread_info:
+        result["thread_name"]     = thread_info.get("name")
+        result["thread_category"] = thread_info.get("category")
+    return result
 
 
 def get_meeting_stats(db: Session, user_id: str, workspace_id: str | None) -> dict:

@@ -7,23 +7,35 @@ APP_URL = os.environ.get("APP_URL", "http://localhost:5173")
 _CALENDAR_PROVIDERS = {"google", "zoom", "outlook"}
 
 
+def _get_meeting_context(job_id: str) -> dict:
+    """Fetch thread category + title for routing decisions. Returns empty dict on failure."""
+    try:
+        from models.meeting_thread import get_thread_for_job
+        thread = get_thread_for_job(job_id)
+        return {"category": thread.category} if thread else {}
+    except Exception:
+        return {}
+
+
 def run_integrations(user_id: str, job_id: str, minutes: dict) -> None:
     """Fire all post-meeting integrations for a user. Never raises."""
     accounts = list_connected_accounts(user_id)
+    meeting_context = _get_meeting_context(job_id)
     for account in accounts:
         if account.provider in _CALENDAR_PROVIDERS:
             continue
         try:
             settings = account.settings or {}
-            _dispatch(account.provider, account.access_token, settings, job_id, minutes)
+            _dispatch(account.provider, account.access_token, settings, job_id, minutes, meeting_context)
         except Exception:
             pass
 
 
-def _dispatch(provider, access_token, settings, job_id, minutes):
+def _dispatch(provider, access_token, settings, job_id, minutes, meeting_context=None):
+    ctx = meeting_context or {}
     if provider == "slack":
         from services.integrations.slack import post_meeting_recap
-        post_meeting_recap(access_token, settings, job_id, minutes, APP_URL)
+        post_meeting_recap(access_token, settings, job_id, minutes, APP_URL, ctx)
     elif provider == "notion":
         from services.integrations.notion import create_meeting_page
         create_meeting_page(access_token, settings, job_id, minutes, APP_URL)

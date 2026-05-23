@@ -7,6 +7,7 @@ from models.task import TaskRecord
 from models.job import JobRecord
 from models.user import User, Workspace, TeamMember
 from services.notifications import create_notification
+from services.deadline_utils import normalize_deadline
 
 
 def _match_name(raw: str, members: list[tuple]) -> str | None:
@@ -75,7 +76,7 @@ def auto_assign_tasks(job_id: str) -> None:
             else:
                 title      = item.get("task") or item.get("description") or str(item)
                 owner_name = (item.get("owner") or "").strip() or None
-                deadline   = (item.get("deadline") or "").strip() or None
+                deadline   = normalize_deadline((item.get("deadline") or "").strip() or None)
 
             assignee_id = _match_name(owner_name, roster) if owner_name else None
             if assignee_id:

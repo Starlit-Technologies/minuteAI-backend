@@ -84,6 +84,56 @@ class SpeakerMapIn(BaseModel):
     speaker_map: dict[str, str]
 
 
+class ShareIn(BaseModel):
+    providers: list[str]
+
+
+@router.post("/results/{job_id}/share")
+def share_result(
+    job_id: str,
+    body: ShareIn,
+    current_user: User = Depends(get_current_user),
+):
+    """Manually push a meeting to one or more connected integrations."""
+    job = store.get(job_id)
+    if not job or job.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    if job.status != "done":
+        raise HTTPException(status_code=400, detail="Meeting is not ready yet.")
+
+    import json as _json
+    from models.connected_account import get_connected_account
+    from services.integrations.runner import _dispatch, APP_URL
+
+    minutes = {}
+    if job.minutes_json:
+        try:
+            minutes = _json.loads(job.minutes_json)
+        except Exception:
+            pass
+    elif job.minutes:
+        minutes = job.minutes
+
+    from models.meeting_thread import get_thread_for_job
+    thread = get_thread_for_job(job_id)
+    meeting_context = {"category": thread.category, "title": minutes.get("title", "")} if thread else {}
+
+    results = {}
+    for provider in body.providers:
+        account = get_connected_account(current_user.id, provider)
+        if not account:
+            results[provider] = "not_connected"
+            continue
+        try:
+            settings = account.settings or {}
+            _dispatch(provider, account.access_token, settings, job_id, minutes, meeting_context)
+            results[provider] = "ok"
+        except Exception as exc:
+            results[provider] = str(exc)
+
+    return {"results": results}
+
+
 @router.post("/results/{job_id}/speakers/apply")
 def apply_speaker_names(
     job_id: str,

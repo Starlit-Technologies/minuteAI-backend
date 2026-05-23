@@ -273,6 +273,21 @@ def run_pipeline(job_id: str):
         except Exception:
             pass
 
+        # Auto-assign to a meeting thread based on participant fingerprint
+        if job.user_id:
+            try:
+                from services.thread_service import auto_assign_thread
+                _j = store.get(job_id)
+                auto_assign_thread(
+                    job_id=job_id,
+                    minutes=minutes,
+                    user_id=_j.user_id,
+                    workspace_id=_j.workspace_id,
+                    job_config=_j.job_config,
+                )
+            except Exception:
+                pass
+
         # Run post-meeting integrations (Slack, Notion, HubSpot, Linear, etc.)
         if job.user_id:
             try:

@@ -1205,6 +1205,15 @@ _JOIN_MESSAGE = (
     "Minutes will be available after the call."
 )
 
+_LATECOMER_MESSAGE = (
+    "📝 Reminder: This meeting is being recorded by MinuteAI.\n"
+    "Minutes will be shared after the call."
+)
+
+# How long to wait before re-sending the announcement for latecomers (seconds).
+_LATECOMER_ANNOUNCE_DELAY = 180  # 3 minutes
+
+
 async def _send_google_meet_chat(page, message: str, session_id: str):
     """Open the chat panel and post a message. Silently skips on any error."""
     try:
@@ -1246,7 +1255,7 @@ async def _send_google_meet_chat(page, message: str, session_id: str):
                     chat_opened = True
 
         if not chat_opened:
-            _log(session_id, "Chat panel button not found — skipping join announcement")
+            _log(session_id, "Chat panel button not found — skipping announcement")
             return
 
         # Find the chat input (textarea or contenteditable div)
@@ -1265,7 +1274,7 @@ async def _send_google_meet_chat(page, message: str, session_id: str):
                     break
 
         if not chat_input:
-            _log(session_id, "Chat input not found — skipping join announcement")
+            _log(session_id, "Chat input not found — skipping announcement")
             return
 
         await chat_input.click()
@@ -1294,9 +1303,190 @@ async def _send_google_meet_chat(page, message: str, session_id: str):
             await page.keyboard.press("Enter")
 
         await page.wait_for_timeout(600)
-        _log(session_id, "Join announcement sent to chat")
+        _log(session_id, "Chat message sent")
     except Exception as exc:
-        _log(session_id, f"Chat announcement skipped: {exc}")
+        _log(session_id, f"Chat message skipped: {exc}")
+
+
+async def _send_zoom_chat(page, message: str, session_id: str):
+    """Open the Zoom web-client chat panel and post a message. Silently skips on any error."""
+    try:
+        # Open the chat panel — try common button selectors
+        chat_opened = False
+
+        # Search across all frames (Zoom web client uses iframes)
+        all_frames = [page] + list(page.frames)
+
+        for frame in all_frames:
+            for label in ["Chat", "Open Chat", "chat", "Show chat"]:
+                with suppress(Exception):
+                    btn = frame.get_by_role("button", name=label, exact=False).first
+                    if await btn.is_visible(timeout=1500):
+                        await btn.click(timeout=2000)
+                        await page.wait_for_timeout(1500)
+                        chat_opened = True
+                        _log(session_id, f"Opened Zoom chat via '{label}' button")
+                        break
+            if chat_opened:
+                break
+
+        # CSS selector fallback for the chat toolbar button
+        if not chat_opened:
+            for frame in all_frames:
+                for selector in [
+                    'button[aria-label*="chat" i]',
+                    'button[aria-label*="Chat" i]',
+                    '.footer-button__chat-icon',
+                    '[data-testid="chat-button"]',
+                    'button.footer-button-base__button[aria-label*="Chat"]',
+                ]:
+                    with suppress(Exception):
+                        btn = frame.locator(selector).first
+                        if await btn.is_visible(timeout=1000):
+                            await btn.click(timeout=2000)
+                            await page.wait_for_timeout(1500)
+                            chat_opened = True
+                            _log(session_id, f"Opened Zoom chat via selector: {selector}")
+                            break
+                if chat_opened:
+                    break
+
+        if not chat_opened:
+            _log(session_id, "Zoom chat button not found — skipping announcement")
+            return
+
+        # Find the chat input across frames
+        chat_input = None
+        target_frame = page
+        for frame in all_frames:
+            for selector in [
+                'textarea[aria-label*="message" i]',
+                'textarea[aria-label*="chat" i]',
+                'textarea[placeholder*="message" i]',
+                'textarea[placeholder*="Type message" i]',
+                'div[contenteditable="true"][aria-label*="chat" i]',
+                'div[contenteditable="true"][aria-label*="message" i]',
+                '#chat-input',
+                '.chat-box textarea',
+                '.chat-box input',
+                'div[contenteditable="true"]',
+            ]:
+                with suppress(Exception):
+                    el = frame.locator(selector).last
+                    if await el.is_visible(timeout=1500):
+                        chat_input = el
+                        target_frame = frame
+                        break
+            if chat_input:
+                break
+
+        if not chat_input:
+            _log(session_id, "Zoom chat input not found — skipping announcement")
+            return
+
+        await chat_input.click()
+        await page.wait_for_timeout(400)
+
+        # Type the message line by line with Shift+Enter for newlines
+        lines = message.split("\n")
+        for i, line in enumerate(lines):
+            await page.keyboard.type(line)
+            if i < len(lines) - 1:
+                await page.keyboard.press("Shift+Enter")
+
+        await page.wait_for_timeout(400)
+
+        # Try send button first, fall back to Enter
+        sent = False
+        for frame in all_frames:
+            for send_label in ["Send", "Send Message", "Submit"]:
+                with suppress(Exception):
+                    send_btn = frame.get_by_role("button", name=send_label, exact=False).first
+                    if await send_btn.is_visible(timeout=800):
+                        await send_btn.click(timeout=2000)
+                        sent = True
+                        break
+            if sent:
+                break
+
+        # CSS fallback for send button
+        if not sent:
+            for frame in all_frames:
+                for selector in [
+                    'button[aria-label*="Send" i]',
+                    '.chat-btn-send',
+                    '[data-testid="send-button"]',
+                ]:
+                    with suppress(Exception):
+                        btn = frame.locator(selector).first
+                        if await btn.is_visible(timeout=500):
+                            await btn.click(timeout=2000)
+                            sent = True
+                            break
+                if sent:
+                    break
+
+        if not sent:
+            await page.keyboard.press("Enter")
+
+        await page.wait_for_timeout(600)
+        _log(session_id, "Zoom chat message sent")
+    except Exception as exc:
+        _log(session_id, f"Zoom chat message skipped: {exc}")
+
+
+async def _send_chat_message(page, message: str, session_id: str, platform: str):
+    """Platform-agnostic chat sender."""
+    if platform == "google_meet":
+        await _send_google_meet_chat(page, message, session_id)
+    elif platform == "zoom":
+        await _send_zoom_chat(page, message, session_id)
+    else:
+        _log(session_id, f"Chat not supported for platform: {platform}")
+
+
+async def _schedule_recording_announcements(page, session_id: str, platform: str):
+    """
+    Send the recording announcement to the meeting chat:
+    1. Immediately upon joining — notifies everyone currently in the call.
+    2. After a ~3-minute delay — catches latecomers who joined after the bot
+       without spamming the chat repeatedly.
+
+    This task runs in the background alongside audio capture. It exits
+    gracefully if the session is cancelled/ended or the bot leaves the meeting.
+    """
+    # ── Initial announcement ──────────────────────────────────────────────
+    await _send_chat_message(page, _JOIN_MESSAGE, session_id, platform)
+
+    # ── Wait, then send the latecomer reminder ────────────────────────────
+    # Sleep in small increments so we can bail out early if the session ends.
+    elapsed = 0
+    while elapsed < _LATECOMER_ANNOUNCE_DELAY:
+        await asyncio.sleep(10)
+        elapsed += 10
+
+        # Bail if the session ended while we were waiting
+        status = _current_status(session_id)
+        if status in {"cancelled", "failed", "processing", "completed"}:
+            _log(session_id, "Session ended before latecomer announcement — skipping")
+            return
+
+        # Bail if the bot is no longer in the meeting
+        try:
+            still_in = await _is_still_in_meeting(page, platform)
+            if not still_in:
+                _log(session_id, "Bot left meeting before latecomer announcement — skipping")
+                return
+        except Exception:
+            pass
+
+    # Re-check one last time before sending
+    status = _current_status(session_id)
+    if status not in {"recording"}:
+        return
+
+    _log(session_id, "Sending latecomer recording reminder")
+    await _send_chat_message(page, _LATECOMER_MESSAGE, session_id, platform)
 
 
 # ── Main Playwright session ───────────────────────────────────────────────────
@@ -1316,6 +1506,7 @@ async def _run_playwright_session(ctx: BotRunContext):
     audio_chunks: list[str] = []
     drain_task: Optional[asyncio.Task] = None
     pcm_drain_task: Optional[asyncio.Task] = None
+    announce_task: Optional[asyncio.Task] = None
 
     CAPTURE_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -1443,8 +1634,10 @@ async def _run_playwright_session(ctx: BotRunContext):
 
                 _log(ctx.session_id, "Admitted — audio capture active")
 
-                if ctx.platform == "google_meet":
-                    await _send_google_meet_chat(page, _JOIN_MESSAGE, ctx.session_id)
+                # Send recording announcements in the background (initial + latecomer reminder)
+                announce_task = asyncio.create_task(
+                    _schedule_recording_announcements(page, ctx.session_id, ctx.platform)
+                )
 
                 drain_task     = asyncio.create_task(_drain_audio_chunks(page, audio_chunks, ctx.session_id))
                 pcm_drain_task = asyncio.create_task(_drain_pcm_for_live_translate(page, ctx.session_id))
@@ -1459,6 +1652,12 @@ async def _run_playwright_session(ctx: BotRunContext):
             finally:
                 # asyncio.CancelledError is a BaseException (Python 3.8+), not Exception,
                 # so suppress(Exception) would NOT catch it — use explicit try/except.
+                if announce_task and not announce_task.done():
+                    announce_task.cancel()
+                    try:
+                        await announce_task
+                    except BaseException:
+                        pass
                 if drain_task and not drain_task.done():
                     drain_task.cancel()
                     try:
