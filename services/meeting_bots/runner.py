@@ -1155,9 +1155,23 @@ async def _is_still_in_meeting(page, platform: str) -> bool:
             page.get_by_role("button", name="End call"),
         ]
         ended = ["You left the meeting", "Call ended", "Return to home screen", "Ready to join?"]
+        fallback_in_meeting = False
     else:
-        active = [page.get_by_role("button", name="Leave"), page.get_by_text("Mute"), page.get_by_text("Participants")]
-        ended  = ["You have left the meeting", "This meeting has ended", "Join Meeting"]
+        # Use the same broad set as _wait_for_admission — avoids false "left" when Zoom
+        # shows "Unmute" instead of "Mute" (bot joined with mic off), or toolbar is hidden.
+        active = [
+            page.get_by_role("button", name="Leave"),
+            page.get_by_role("button", name="Mute"),
+            page.get_by_role("button", name="Unmute"),
+            page.get_by_role("button", name="Stop Video"),
+            page.get_by_role("button", name="Start Video"),
+            page.get_by_text("Participants"),
+            page.get_by_text("Chat"),
+        ]
+        ended  = ["You have left the meeting", "This meeting has ended", "Join Meeting", "This meeting has been ended by the host"]
+        # If we can't determine state for Zoom, assume still in meeting — it's safer
+        # than exiting prematurely and saving 0 audio chunks.
+        fallback_in_meeting = True
 
     for loc in active:
         with suppress(Exception):
@@ -1167,11 +1181,15 @@ async def _is_still_in_meeting(page, platform: str) -> bool:
         with suppress(Exception):
             if await page.get_by_text(text).is_visible(timeout=800):
                 return False
-    return False
+    return fallback_in_meeting
 
 
 async def _wait_for_recording_completion(page, session_id: str, platform: str):
     deadline = asyncio.get_running_loop().time() + MEETING_BOT_RECORD_SECONDS
+    # Wait at least 12 s before first presence check — gives MediaRecorder time to
+    # fire its first ondataavailable event (start(4000)) and ensures Zoom's toolbar
+    # is fully rendered before we try to detect buttons.
+    min_record_until = asyncio.get_running_loop().time() + 12
     while asyncio.get_running_loop().time() < deadline:
         # Check in-memory stop signal first (set by /end route immediately).
         if session_id in _stop_requested:
@@ -1179,9 +1197,10 @@ async def _wait_for_recording_completion(page, session_id: str, platform: str):
             return
         if _current_status(session_id) in {"cancelled", "processing"}:
             return
-        if not await _is_still_in_meeting(page, platform):
-            _status(session_id, "processing")
-            return
+        if asyncio.get_running_loop().time() >= min_record_until:
+            if not await _is_still_in_meeting(page, platform):
+                _status(session_id, "processing")
+                return
         await page.wait_for_timeout(1000)
     _status(session_id, "processing")
 
