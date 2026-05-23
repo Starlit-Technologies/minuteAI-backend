@@ -200,7 +200,6 @@ def connect_zoom(origin: str = Query(default=""), user: User = Depends(get_curre
         "client_id": ZOOM_CLIENT_ID,
         "redirect_uri": f"{BACKEND_URL}/integrations/callback/zoom",
         "response_type": "code",
-        "scope": "meeting:read user:read",
         "state": state,
     }
     return {"url": f"{_ZOOM_AUTH_URL}?{urllib.parse.urlencode(params)}"}
