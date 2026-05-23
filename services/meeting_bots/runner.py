@@ -1088,6 +1088,8 @@ async def _wait_for_admission(page, session_id: str, platform: str,
                               sign_in_attempted: bool = False, sign_in_ok: bool = False) -> bool:
     if _current_status(session_id) not in {"cancelled", "failed"}:
         _status(session_id, "waiting_for_host")
+    if platform != "google_meet":
+        _log(session_id, f"Waiting for Zoom admission — current URL: {page.url}")
     # Zoom needs a longer window: the "Joining Meeting..." spinner can run for
     # 30–60 s before the in-meeting UI appears on the headless browser.
     deadline_seconds = 90 if platform == "google_meet" else 120
@@ -1125,15 +1127,23 @@ async def _wait_for_admission(page, session_id: str, platform: str,
                 page.get_by_text("You joined"),
             ]
         else:
-            # Zoom web client (app.zoom.us/wc/) signals for being inside the meeting
+            # Primary check: URL moves from /join → /participant when Zoom admits the bot.
+            # This is the most reliable signal — it's impossible to false-positive from
+            # the waiting room page.
+            if _zoom_is_in_meeting_url(page):
+                _log(session_id, f"Zoom URL indicates in-meeting: {page.url}")
+                _status(session_id, "recording")
+                return True
+
+            # Secondary: toolbar buttons that only exist once inside the meeting.
+            # Deliberately exclude page.get_by_text("Chat") / get_by_text("Participants")
+            # as those also appear on the Zoom waiting-room page (false positives).
             signals = [
-                page.get_by_role("button", name="Leave"),
                 page.get_by_role("button", name="Mute"),
                 page.get_by_role("button", name="Unmute"),
                 page.get_by_role("button", name="Stop Video"),
                 page.get_by_role("button", name="Start Video"),
-                page.get_by_text("Participants"),
-                page.get_by_text("Chat"),
+                page.get_by_role("button", name="Leave"),
             ]
 
         for locator in signals:
@@ -1157,20 +1167,18 @@ async def _is_still_in_meeting(page, platform: str) -> bool:
         ended = ["You left the meeting", "Call ended", "Return to home screen", "Ready to join?"]
         fallback_in_meeting = False
     else:
-        # Use the same broad set as _wait_for_admission — avoids false "left" when Zoom
-        # shows "Unmute" instead of "Mute" (bot joined with mic off), or toolbar is hidden.
+        # URL is the primary indicator for Zoom — /wc/.../participant = in meeting.
+        if _zoom_is_in_meeting_url(page):
+            return True
         active = [
-            page.get_by_role("button", name="Leave"),
             page.get_by_role("button", name="Mute"),
             page.get_by_role("button", name="Unmute"),
             page.get_by_role("button", name="Stop Video"),
             page.get_by_role("button", name="Start Video"),
-            page.get_by_text("Participants"),
-            page.get_by_text("Chat"),
+            page.get_by_role("button", name="Leave"),
         ]
         ended  = ["You have left the meeting", "This meeting has ended", "Join Meeting", "This meeting has been ended by the host"]
-        # If we can't determine state for Zoom, assume still in meeting — it's safer
-        # than exiting prematurely and saving 0 audio chunks.
+        # If we can't determine state, assume still in meeting (avoids premature exit).
         fallback_in_meeting = True
 
     for loc in active:
