@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse, urlunparse
 
 import imageio_ffmpeg
 
@@ -909,8 +910,51 @@ def _zoom_is_in_meeting_url(page) -> bool:
     return "/wc/" in page.url and "/join" not in page.url
 
 
+def _zoom_web_client_url(meeting_url: str) -> Optional[str]:
+    """Convert Zoom launcher links (/j/{id}) to the web-client join URL."""
+    parsed = urlparse(meeting_url)
+    if "zoom.us" not in parsed.netloc:
+        return None
+
+    match = re.search(r"/j/(\d+)", parsed.path)
+    if not match:
+        return None
+
+    web_path = f"/wc/join/{match.group(1)}"
+    return urlunparse(parsed._replace(path=web_path, params="", fragment=""))
+
+
+async def _zoom_wait_past_interstitial(page, session_id: str, timeout_ms: int = 25000) -> bool:
+    """Return True when Zoom has moved past the Cloudflare/launcher interstitial."""
+    try:
+        await page.wait_for_function(
+            "() => document.title !== 'Just a moment...'",
+            timeout=timeout_ms,
+        )
+        return True
+    except Exception:
+        _log(session_id, f"Zoom interstitial still active after {timeout_ms // 1000}s")
+        return False
+
+
+async def _zoom_open_web_client(page, meeting_url: str, session_id: str) -> bool:
+    web_client_url = _zoom_web_client_url(meeting_url)
+    if not web_client_url or web_client_url == page.url:
+        return False
+
+    _log(session_id, f"Opening Zoom web client directly - {web_client_url}")
+    await page.goto(web_client_url, wait_until="domcontentloaded", timeout=60000)
+    await _zoom_wait_past_interstitial(page, session_id, timeout_ms=25000)
+    await page.wait_for_timeout(2000)
+    return True
+
+
 async def _zoom_click_join_from_browser(page, session_id: str):
     """Click the 'Join from browser' button on Zoom's launcher page."""
+    if "/wc/join/" in page.url:
+        _log(session_id, "Zoom web client already open - skipping launcher join")
+        return
+
     _log(session_id, f"Zoom launcher — title: {await page.title()} url: {page.url}")
 
     # Wait for the launcher to render before searching.
@@ -1035,36 +1079,32 @@ async def _zoom_find_name_field(page):
 
 
 async def _zoom_wait_for_name_form(page, session_id: str, timeout_seconds: int = 45) -> bool:
-    """Wait until the name input is attached to the DOM (handles long 'Joining Meeting...' loader).
-    Returns True if found, False if URL already moved into the meeting."""
-    _log(session_id, "Waiting for Zoom name form to render…")
-    try:
-        # wait_for_selector with state="attached" just needs the element in the DOM —
-        # no visibility/opacity requirements, so it catches the element as soon as
-        # the React app renders it, even before CSS transitions complete.
-        await page.wait_for_selector(
-            "#input-for-name, #inputname, input[aria-describedby='error-for-name']",
-            state="attached",
-            timeout=timeout_seconds * 1000,
-        )
-        _log(session_id, "Zoom name form found")
-        return True
-    except Exception:
+    """Wait until the name input is visible, including inputs inside child frames."""
+    _log(session_id, "Waiting for Zoom name form to render...")
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        frame, field = await _zoom_find_name_field(page)
+        if frame and field:
+            _log(session_id, "Zoom name form found")
+            return True
         if _zoom_is_in_meeting_url(page):
             return False
-        _log(session_id, "Zoom name form did not appear within timeout")
-        return False
+        await page.wait_for_timeout(1000)
+
+    _log(session_id, "Zoom name form did not appear within timeout")
+    return False
 
 
 async def _prepare_and_join_zoom(page, meeting_url: str, bot_name: str, session_id: str):
     await page.goto(meeting_url, wait_until="domcontentloaded", timeout=60000)
-    with suppress(Exception):
-        await page.wait_for_function(
-            "() => document.title !== 'Just a moment...'",
-            timeout=15000,
-        )
+    past_interstitial = await _zoom_wait_past_interstitial(page, session_id, timeout_ms=25000)
+    if not past_interstitial:
+        await _zoom_open_web_client(page, meeting_url, session_id)
     await page.wait_for_timeout(2000)
     await _zoom_click_join_from_browser(page, session_id)
+
+    if await page.title() == "Just a moment...":
+        await _zoom_open_web_client(page, meeting_url, session_id)
 
     # Wait for the name form (the "Joining Meeting..." spinner is just a
     # transition — the form appears after it clears).
