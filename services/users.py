@@ -52,15 +52,29 @@ def change_password(db: Session, user: User, current_password: str, new_password
     return {"message": "Password updated."}
 
 
-def update_preferences(db: Session, user: User, timezone: str | None, language: str | None, theme: str | None) -> dict:
+def update_preferences(
+    db: Session, user: User,
+    timezone: str | None, language: str | None, theme: str | None,
+    meeting_join: str | None = None, recap_to: str | None = None,
+) -> dict:
     if timezone is not None:
         user.timezone = timezone
     if language is not None:
         user.language = language
     if theme is not None:
         user.theme = theme
+    if meeting_join is not None:
+        user.meeting_join = meeting_join
+    if recap_to is not None:
+        user.recap_to = recap_to
     db.commit()
-    return {"timezone": user.timezone, "language": user.language, "theme": user.theme}
+    return {
+        "timezone":     user.timezone or "UTC",
+        "language":     user.language or "en",
+        "theme":        user.theme    or "system",
+        "meeting_join": user.meeting_join,
+        "recap_to":     user.recap_to,
+    }
 
 
 def save_onboarding(db: Session, user: User, body: OnboardingIn) -> dict:
@@ -85,9 +99,11 @@ def save_onboarding(db: Session, user: User, body: OnboardingIn) -> dict:
 
 def get_preferences(user: User) -> dict:
     return {
-        "timezone": user.timezone or "UTC",
-        "language": user.language or "en",
-        "theme":    user.theme    or "system",
+        "timezone":     user.timezone or "UTC",
+        "language":     user.language or "en",
+        "theme":        user.theme    or "system",
+        "meeting_join": user.meeting_join,
+        "recap_to":     user.recap_to,
     }
 
 

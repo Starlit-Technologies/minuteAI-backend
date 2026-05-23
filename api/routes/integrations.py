@@ -85,11 +85,15 @@ class UpdateIntegrationBody(BaseModel):
 
 
 class IntegrationSettingsIn(BaseModel):
-    database_id: Optional[str] = None   # Notion
-    folder_id: Optional[str] = None     # Google Drive
-    team_id: Optional[str] = None       # Linear
-    channel_id: Optional[str] = None    # Slack
-    url: Optional[str] = None           # Webhook
+    database_id: Optional[str] = None       # Notion
+    folder_id: Optional[str] = None         # Google Drive
+    team_id: Optional[str] = None           # Linear
+    channel_id: Optional[str] = None        # Slack
+    url: Optional[str] = None               # Webhook
+    bot_join_rule: Optional[str] = None     # 'all' | 'owned' | 'team_only' | 'manual'
+    auto_post: Optional[bool] = None        # auto-post to messaging integrations
+    post_categories: Optional[list[str]] = None  # which meeting categories to post
+    post_sections: Optional[list[str]] = None    # which sections to include in post
 
 
 class RoutingDestination(BaseModel):
@@ -245,6 +249,7 @@ def callback_zoom(code: str = None, state: str = None, error: str = None):
         user_id=user_id, provider="zoom",
         access_token=access_token, refresh_token=refresh_token,
         token_expiry=expiry, email=email,
+        settings={"scope_v2": True},
     )
     return RedirectResponse(f"{base}/integrations?connected=zoom")
 
@@ -651,6 +656,10 @@ def connect_webhook(body: WebhookConnectBody, user: User = Depends(get_current_u
 @router.patch("/{provider}/settings")
 def update_settings(provider: str, body: IntegrationSettingsIn, user: User = Depends(get_current_user)):
     updates = {k: v for k, v in body.dict().items() if v is not None}
+    # also allow explicit False / empty list overrides
+    for k, v in body.dict().items():
+        if v is False or v == []:
+            updates[k] = v
     if not updates:
         raise HTTPException(400, "No settings provided")
     account = update_integration_settings(user.id, provider, updates)

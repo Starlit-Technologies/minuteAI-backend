@@ -107,7 +107,12 @@ def upsert_connected_account(
             if email:
                 record.email = email
             if settings is not None:
-                record.settings_json = json.dumps(settings)
+                try:
+                    existing = json.loads(record.settings_json) if record.settings_json else {}
+                except Exception:
+                    existing = {}
+                existing.update(settings)
+                record.settings_json = json.dumps(existing)
         else:
             record = ConnectedAccountRecord(
                 id=str(uuid.uuid4()),

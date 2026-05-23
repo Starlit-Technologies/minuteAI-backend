@@ -15,6 +15,8 @@ class UpdatePrefsIn(BaseModel):
     timezone: str | None = None
     language: str | None = None
     theme: str | None = None
+    meeting_join: str | None = None   # 'all' | 'own' | 'teammates' | 'invite'
+    recap_to: str | None = None       # 'everyone' | 'team' | 'me'
 
 
 class OnboardingIn(BaseModel):

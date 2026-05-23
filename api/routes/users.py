@@ -49,7 +49,7 @@ def update_preferences(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    return svc.update_preferences(db, current_user, body.timezone, body.language, body.theme)
+    return svc.update_preferences(db, current_user, body.timezone, body.language, body.theme, body.meeting_join, body.recap_to)
 
 
 @router.get("/me/preferences")
