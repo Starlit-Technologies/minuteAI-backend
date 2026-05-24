@@ -1402,20 +1402,37 @@ async def _leave_meeting(page, platform: str):
 
 # ── Join announcement chat message ────────────────────────────────────────────
 
-def _build_join_message(user_name: str) -> str:
-    who = f"{user_name}'s " if user_name else ""
-    return (
-        f"👋 {who}MinuteAI Notetaker has joined to record & transcribe this meeting.\n"
-        "Type '/ff stop' to stop recording. Minutes will be available after the call."
-    )
+_APP_URL = os.environ.get("APP_URL", "").strip().rstrip("/")
 
 
-def _build_latecomer_message(user_name: str) -> str:
-    who = f"{user_name}'s " if user_name else "a "
-    return (
-        f"📝 Reminder: This meeting is being recorded by {who}MinuteAI Notetaker.\n"
-        "Minutes will be shared after the call."
-    )
+def _session_link(session_id: str) -> str:
+    if _APP_URL:
+        return f"{_APP_URL}/meeting-bots/{session_id}"
+    return ""
+
+
+def _build_join_message(user_name: str, session_id: str = "") -> str:
+    who  = f"{user_name}'s " if user_name else ""
+    link = _session_link(session_id)
+    lines = [
+        f"👋 {who}MinuteAI Notetaker has joined to record & transcribe this meeting.",
+        "This meeting is being recorded. All participants are notified of the recording.",
+    ]
+    if link:
+        lines.append(f"View live transcript & summary: {link}")
+    return "\n".join(lines)
+
+
+def _build_latecomer_message(user_name: str, session_id: str = "") -> str:
+    who  = f"{user_name}'s " if user_name else "a "
+    link = _session_link(session_id)
+    lines = [
+        f"📝 Reminder: This meeting is being recorded by {who}MinuteAI Notetaker.",
+        "Minutes and transcript will be shared after the call.",
+    ]
+    if link:
+        lines.append(f"View live transcript: {link}")
+    return "\n".join(lines)
 
 
 # How long to wait before re-sending the announcement for latecomers (seconds).
@@ -1758,7 +1775,7 @@ async def _schedule_recording_announcements(page, session_id: str, platform: str
     gracefully if the session is cancelled/ended or the bot leaves the meeting.
     """
     # ── Initial announcement ──────────────────────────────────────────────
-    await _send_chat_message(page, _build_join_message(user_name), session_id, platform)
+    await _send_chat_message(page, _build_join_message(user_name, session_id), session_id, platform)
 
     # ── Wait, then send the latecomer reminder ────────────────────────────
     # Sleep in small increments so we can bail out early if the session ends.
@@ -1788,7 +1805,7 @@ async def _schedule_recording_announcements(page, session_id: str, platform: str
         return
 
     _log(session_id, "Sending latecomer recording reminder")
-    await _send_chat_message(page, _build_latecomer_message(user_name), session_id, platform)
+    await _send_chat_message(page, _build_latecomer_message(user_name, session_id), session_id, platform)
 
 
 # ── Main Playwright session ───────────────────────────────────────────────────
