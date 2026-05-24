@@ -1096,9 +1096,13 @@ async def _zoom_wait_for_name_form(page, session_id: str, timeout_seconds: int =
 
 
 async def _prepare_and_join_zoom(page, meeting_url: str, bot_name: str, session_id: str):
-    await page.goto(meeting_url, wait_until="domcontentloaded", timeout=60000)
+    initial_url = _zoom_web_client_url(meeting_url) or meeting_url
+    if initial_url != meeting_url:
+        _log(session_id, f"Using Zoom web client URL - {initial_url}")
+
+    await page.goto(initial_url, wait_until="domcontentloaded", timeout=60000)
     past_interstitial = await _zoom_wait_past_interstitial(page, session_id, timeout_ms=25000)
-    if not past_interstitial:
+    if not past_interstitial and initial_url == meeting_url:
         await _zoom_open_web_client(page, meeting_url, session_id)
     await page.wait_for_timeout(2000)
     await _zoom_click_join_from_browser(page, session_id)
