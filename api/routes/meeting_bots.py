@@ -1,8 +1,11 @@
 import os
+import mimetypes
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -12,6 +15,7 @@ from models.consent import log_consent
 from models.meeting_bot import (
     create_session,
     get_session,
+    get_session_by_share_token,
     list_sessions,
     list_upcoming_workspace_sessions,
     list_workspace_sessions,
@@ -25,6 +29,7 @@ from services.queue import cancel_queued_session
 
 router = APIRouter(prefix="/meeting-bots", tags=["meeting-bots"])
 MEETING_BOT_RECORDER_NAME = os.environ.get("MEETING_BOT_RECORDER_NAME", "MinuteAI Recorder").strip() or "MinuteAI Recorder"
+STORAGE_ROOT = (Path(__file__).parent.parent.parent / "storage").resolve()
 
 
 SUPPORTED_STATUSES = {
@@ -59,6 +64,7 @@ def _utc(dt: datetime) -> datetime:
 def _serialize(session):
     return {
         "id": session.id,
+        "share_token": session.share_token,
         "bot_account_id": session.bot_account_id,
         "calendar_event_id": session.calendar_event_id,
         "source": session.source,
@@ -96,6 +102,16 @@ def _workspace_accessible(workspace_id: str, current_user: User, db: Session) ->
 def _ensure_workspace_access(workspace_id: str, current_user: User, db: Session):
     if not _workspace_accessible(workspace_id, current_user, db):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Not a member of this workspace.")
+
+
+def _ensure_session_access(session_id: str, current_user: User, db: Session):
+    session = get_session(session_id)
+    if not session or (
+        session.user_id != current_user.id
+        and not (session.workspace_id and _workspace_accessible(session.workspace_id, current_user, db))
+    ):
+        raise HTTPException(status_code=404, detail="Meeting bot session not found.")
+    return session
 
 
 @router.post("")
@@ -179,13 +195,35 @@ def get_meeting_bot_session(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    session = get_session(session_id)
-    if not session or (
-        session.user_id != current_user.id
-        and not (session.workspace_id and _workspace_accessible(session.workspace_id, current_user, db))
-    ):
-        raise HTTPException(status_code=404, detail="Meeting bot session not found.")
+    session = _ensure_session_access(session_id, current_user, db)
     return _serialize(session)
+
+
+@router.get("/{session_id}/artifact")
+def download_meeting_bot_artifact(
+    session_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    session = _ensure_session_access(session_id, current_user, db)
+    if not session.recording_path:
+        raise HTTPException(status_code=404, detail="Meeting bot artifact not found.")
+
+    path = Path(session.recording_path)
+    if not path.is_absolute():
+        path = Path(__file__).parent.parent.parent / path
+    path = path.resolve()
+
+    try:
+        path.relative_to(STORAGE_ROOT)
+    except ValueError as exc:
+        raise HTTPException(status_code=403, detail="Meeting bot artifact is outside storage.") from exc
+
+    if not path.exists() or not path.is_file():
+        raise HTTPException(status_code=404, detail="Meeting bot artifact file not found.")
+
+    media_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+    return FileResponse(path, media_type=media_type, filename=path.name)
 
 
 @router.get("/{session_id}/calendar.ics")
@@ -306,3 +344,36 @@ def end_meeting_bot_session(
         failure_reason=None,
     )
     return _serialize(updated)
+
+
+# ── Public live-view endpoint (no auth) ───────────────────────────────────────
+
+_ACTIVE_STATUSES = {
+    "queued", "scheduled", "preparing", "joining", "waiting_for_host", "recording",
+}
+
+
+@router.get("/live/{share_token}")
+def get_live_session(share_token: str):
+    """
+    Public endpoint — no authentication required.
+    Returns limited session info for the participant live-view page.
+    Sensitive fields (meeting_url, user_id, logs) are excluded.
+    """
+    session = get_session_by_share_token(share_token)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found.")
+
+    is_live = session.status in _ACTIVE_STATUSES
+
+    return {
+        "share_token": session.share_token,
+        "platform":    session.platform,
+        "title":       session.title,
+        "bot_name":    session.bot_name,
+        "status":      session.status,
+        "is_live":     is_live,
+        "started_at":  session.started_at.isoformat() + "Z" if session.started_at else None,
+        "ended_at":    session.ended_at.isoformat() + "Z" if session.ended_at else None,
+        "job_id":      session.job_id,
+    }

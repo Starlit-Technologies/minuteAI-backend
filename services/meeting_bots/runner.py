@@ -1406,9 +1406,18 @@ _APP_URL = os.environ.get("APP_URL", "").strip().rstrip("/")
 
 
 def _session_link(session_id: str) -> str:
-    if _APP_URL:
-        return f"{_APP_URL}/meeting-bots/{session_id}"
-    return ""
+    """Return the public (no-auth) live-view URL for the given session.
+    The runner receives the session_id; the share_token is looked up here."""
+    if not _APP_URL:
+        return ""
+    try:
+        from models.meeting_bot import get_session as _get_session
+        s = _get_session(session_id)
+        if s and s.share_token:
+            return f"{_APP_URL}/live/{s.share_token}"
+    except Exception:
+        pass
+    return f"{_APP_URL}/meeting-bots/{session_id}"
 
 
 def _build_join_message(user_name: str, session_id: str = "") -> str:

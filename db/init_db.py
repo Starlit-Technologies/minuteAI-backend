@@ -108,6 +108,9 @@ def run_migrations():
             "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS synced_at TIMESTAMP",
             # Meeting thread category
             "ALTER TABLE meeting_threads ADD COLUMN IF NOT EXISTS category TEXT",
+            # Public share token for bot session live-view page
+            "ALTER TABLE meeting_bot_sessions ADD COLUMN IF NOT EXISTS share_token TEXT",
+            "CREATE UNIQUE INDEX IF NOT EXISTS ix_meeting_bot_sessions_share_token ON meeting_bot_sessions (share_token)",
         ]
     else:
         migrations = [
@@ -170,6 +173,8 @@ def run_migrations():
             "ALTER TABLE tasks ADD COLUMN synced_at DATETIME",
             # Meeting thread category
             "ALTER TABLE meeting_threads ADD COLUMN category TEXT",
+            # Public share token for bot session live-view page
+            "ALTER TABLE meeting_bot_sessions ADD COLUMN share_token TEXT",
         ]
     with engine.connect() as conn:
         for sql in migrations:

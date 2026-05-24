@@ -32,6 +32,7 @@ class MeetingBotSessionRecord(Base):
     job_id         = Column(String,  nullable=True, index=True)
     logs_json      = Column(Text,    nullable=True)
     attendees_json = Column(Text,    nullable=True)
+    share_token    = Column(String,  nullable=True, unique=True, index=True)
     created_at     = Column(DateTime, server_default=func.now())
 
 
@@ -57,6 +58,7 @@ class MeetingBotSession:
     job_id: Optional[str]
     logs: list[str] = field(default_factory=list)
     attendees: list[str] = field(default_factory=list)
+    share_token: Optional[str] = None
     created_at: Optional[datetime] = None
 
 
@@ -82,6 +84,7 @@ def _to_dataclass(record: MeetingBotSessionRecord) -> MeetingBotSession:
         job_id=record.job_id,
         logs=json.loads(record.logs_json) if getattr(record, "logs_json", None) else [],
         attendees=json.loads(record.attendees_json) if getattr(record, "attendees_json", None) else [],
+        share_token=getattr(record, "share_token", None),
         created_at=record.created_at,
     )
 
@@ -101,7 +104,8 @@ def create_session(
     duration_minutes: Optional[int] = None,
     attendees: Optional[list[str]] = None,
 ) -> MeetingBotSession:
-    session_id = str(uuid.uuid4())
+    session_id   = str(uuid.uuid4())
+    share_token  = uuid.uuid4().hex  # short, URL-safe, 32-char token
     with SessionLocal() as db:
         record = MeetingBotSessionRecord(
             id=session_id,
@@ -118,6 +122,7 @@ def create_session(
             scheduled_for=scheduled_for,
             duration_minutes=duration_minutes,
             attendees_json=json.dumps(attendees) if attendees else None,
+            share_token=share_token,
         )
         db.add(record)
         db.commit()
@@ -128,6 +133,16 @@ def create_session(
 def get_session(session_id: str) -> Optional[MeetingBotSession]:
     with SessionLocal() as db:
         record = db.get(MeetingBotSessionRecord, session_id)
+        return _to_dataclass(record) if record else None
+
+
+def get_session_by_share_token(share_token: str) -> Optional[MeetingBotSession]:
+    with SessionLocal() as db:
+        record = (
+            db.query(MeetingBotSessionRecord)
+            .filter(MeetingBotSessionRecord.share_token == share_token)
+            .first()
+        )
         return _to_dataclass(record) if record else None
 
 
