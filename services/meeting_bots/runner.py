@@ -951,7 +951,10 @@ async def _zoom_open_web_client(page, meeting_url: str, session_id: str) -> bool
 
 async def _zoom_click_join_from_browser(page, session_id: str):
     """Click the 'Join from browser' button on Zoom's launcher page."""
-    if "/wc/join/" in page.url:
+    # Both URL formats mean the web client is already open — skip launcher.
+    # New format: app.zoom.us/wc/join/{id}
+    # Old format (after regional redirect): app.zoom.us/wc/{id}/join
+    if "/wc/join/" in page.url or re.search(r"/wc/\d+/join", page.url):
         _log(session_id, "Zoom web client already open - skipping launcher join")
         return
 
@@ -1097,15 +1100,20 @@ async def _zoom_wait_for_name_form(page, session_id: str, timeout_seconds: int =
 
 async def _prepare_and_join_zoom(page, meeting_url: str, bot_name: str, session_id: str):
     initial_url = _zoom_web_client_url(meeting_url) or meeting_url
-    if initial_url != meeting_url:
-        _log(session_id, f"Using Zoom web client URL - {initial_url}")
+    _log(session_id, f"Zoom join start — original: {meeting_url}")
+    _log(session_id, f"Zoom join start — web client: {initial_url}")
 
     await page.goto(initial_url, wait_until="domcontentloaded", timeout=60000)
+    _log(session_id, f"After goto — title: '{await page.title()}' url: {page.url}")
+
     past_interstitial = await _zoom_wait_past_interstitial(page, session_id, timeout_ms=25000)
     if not past_interstitial and initial_url == meeting_url:
         await _zoom_open_web_client(page, meeting_url, session_id)
     await page.wait_for_timeout(2000)
+    _log(session_id, f"Before browser-join click — title: '{await page.title()}' url: {page.url}")
+
     await _zoom_click_join_from_browser(page, session_id)
+    _log(session_id, f"After browser-join — title: '{await page.title()}' url: {page.url}")
 
     if await page.title() == "Just a moment...":
         await _zoom_open_web_client(page, meeting_url, session_id)
@@ -1113,6 +1121,7 @@ async def _prepare_and_join_zoom(page, meeting_url: str, bot_name: str, session_
     # Wait for the name form (the "Joining Meeting..." spinner is just a
     # transition — the form appears after it clears).
     name_form_visible = await _zoom_wait_for_name_form(page, session_id, timeout_seconds=30)
+    _log(session_id, f"Name form visible: {name_form_visible} — url: {page.url}")
 
     if not name_form_visible:
         if _zoom_is_in_meeting_url(page):
@@ -1123,7 +1132,9 @@ async def _prepare_and_join_zoom(page, meeting_url: str, bot_name: str, session_
 
     await _zoom_fill_name(page, bot_name, session_id)
     await page.wait_for_timeout(800)
+    _log(session_id, f"After name fill — url: {page.url}")
     await _zoom_click_join_button(page, session_id)
+    _log(session_id, f"After join button click — url: {page.url}")
 
 
 # ── Shared wait/detection ─────────────────────────────────────────────────────
@@ -1717,8 +1728,7 @@ async def _run_playwright_session(ctx: BotRunContext):
                         _failure(
                             ctx.session_id,
                             "Bot was not admitted to the meeting within the timeout. "
-                            "The host needs to accept 'MinuteAI Recorder' from the waiting room. "
-                            f"Debug screenshot: {screenshot_path}",
+                            "The host needs to accept 'MinuteAI Recorder' from the waiting room.",
                             recording_path=screenshot_path,
                         )
                     return
