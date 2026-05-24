@@ -1165,14 +1165,15 @@ async def _prepare_and_join_zoom(page, meeting_url: str, bot_name: str, session_
 
     # Inject ZAK token so the bot joins as the authenticated Zoom user instead
     # of an anonymous guest — this bypasses reCAPTCHA on the web client form.
+    zak = None
     with suppress(Exception):
         zak = await asyncio.get_event_loop().run_in_executor(None, _fetch_zoom_zak)
-        if zak:
-                sep = "&" if "?" in initial_url else "?"
-                initial_url = f"{initial_url}{sep}zak={zak}"
-                _log(session_id, "Zoom join — ZAK token injected (authenticated join)")
-            else:
-                _log(session_id, "Zoom join — no ZAK available, joining as guest")
+    if zak:
+        sep = "&" if "?" in initial_url else "?"
+        initial_url = f"{initial_url}{sep}zak={zak}"
+        _log(session_id, "Zoom join — ZAK token injected (authenticated join)")
+    else:
+        _log(session_id, "Zoom join — no ZAK available, joining as guest")
 
     await page.goto(initial_url, wait_until="domcontentloaded", timeout=60000)
     _log(session_id, f"After goto — title: '{await page.title()}' url: {page.url}")
