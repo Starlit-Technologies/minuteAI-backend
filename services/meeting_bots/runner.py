@@ -123,6 +123,18 @@ _ANTIDETECT_SCRIPT = """
             return _query.apply(this, arguments);
         };
     }
+
+    // Spoof media device list — Chromium's fake devices expose "Fake Audio Input Device"
+    // which Zoom's bot detection flags. Return realistic laptop device names instead.
+    if (navigator.mediaDevices && navigator.mediaDevices.enumerateDevices) {
+        navigator.mediaDevices.enumerateDevices = function() {
+            return Promise.resolve([
+                { kind: 'audioinput',  label: 'Built-in Microphone',          deviceId: 'default',  groupId: 'built-in' },
+                { kind: 'audiooutput', label: 'Built-in Speakers',             deviceId: 'default',  groupId: 'built-in' },
+                { kind: 'videoinput',  label: 'FaceTime HD Camera (Built-in)', deviceId: 'facetime', groupId: 'camera'   },
+            ]);
+        };
+    }
 })();
 """
 
@@ -1136,6 +1148,13 @@ async def _prepare_and_join_zoom(page, meeting_url: str, bot_name: str, session_
     await _zoom_click_join_button(page, session_id)
     _log(session_id, f"After join button click — url: {page.url}")
 
+    # Log page state so we can tell if the join was accepted (waiting room)
+    # or rejected (error / still on join form).
+    await page.wait_for_timeout(2000)
+    with suppress(Exception):
+        body_text = await page.evaluate("() => document.body.innerText.slice(0, 300)")
+        _log(session_id, f"Page state after join: {body_text!r}")
+
 
 # ── Shared wait/detection ─────────────────────────────────────────────────────
 
@@ -1149,6 +1168,7 @@ async def _wait_for_admission(page, session_id: str, platform: str,
     # 30–60 s before the in-meeting UI appears on the headless browser.
     deadline_seconds = 90 if platform == "google_meet" else 120
 
+    _zoom_diag_counter = 0
     for _ in range(deadline_seconds // 3):
         if _current_status(session_id) in {"cancelled", "processing"}:
             return False
@@ -1206,6 +1226,14 @@ async def _wait_for_admission(page, session_id: str, platform: str,
                 if await locator.is_visible(timeout=1200):
                     _status(session_id, "recording")
                     return True
+
+        # Log page state every ~15 s for Zoom so we can see what's on screen.
+        if platform != "google_meet":
+            _zoom_diag_counter += 1
+            if _zoom_diag_counter % 5 == 1:
+                with suppress(Exception):
+                    body = await page.evaluate("() => document.body.innerText.slice(0, 200)")
+                    _log(session_id, f"Zoom page state: {body!r}")
 
         await page.wait_for_timeout(3000)
 
