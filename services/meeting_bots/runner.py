@@ -1312,10 +1312,12 @@ async def _send_google_meet_chat(page, message: str, session_id: str):
 
         # Wait for the right-side nav (where chat lives) to render.
         # data-panel-id="2" is the stable identifier for the Chat panel button.
+        # Timeout of 60 s matches reality: the latecomer reminder (3 min) works,
+        # so the nav is definitely rendered by then — 60 s is a safe upper bound.
         with suppress(Exception):
             await page.wait_for_selector(
                 'button[data-panel-id="2"], button[aria-label*="Chat" i]',
-                timeout=8000,
+                timeout=60000,
             )
 
         # Open chat panel — try stable CSS selector first, then aria-label variants
