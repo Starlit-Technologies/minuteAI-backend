@@ -1110,46 +1110,42 @@ async def _zoom_wait_for_name_form(page, session_id: str, timeout_seconds: int =
     return False
 
 
-def _fetch_zoom_zak(user_id: str) -> Optional[str]:
-    """Return a Zoom Access Key token for the user so the bot joins as an
-    authenticated account, bypassing reCAPTCHA on the web client."""
+def _fetch_zoom_zak(_unused_user_id: str = "") -> Optional[str]:
+    """Return a Zoom Access Key for the bot account configured in the admin panel.
+    Uses the bot's stored Zoom refresh token to get a fresh access token, then
+    fetches the ZAK so the bot joins meetings as an authenticated Zoom account
+    (bypassing reCAPTCHA on the web client)."""
     import base64
     import requests as _req
-    from datetime import datetime, timedelta
-    from models.connected_account import get_connected_account, upsert_connected_account
+    from models.bot_config import load_bot_config, save_bot_config
 
-    account = get_connected_account(user_id, "zoom")
-    if not account or not account.access_token:
+    cfg = load_bot_config()
+    refresh_token = cfg.get("zoom_bot_refresh_token", "")
+    if not refresh_token:
         return None
 
-    access_token = account.access_token
+    zoom_client_id     = os.environ.get("ZOOM_OAUTH_CLIENT_ID", "")
+    zoom_client_secret = os.environ.get("ZOOM_OAUTH_CLIENT_SECRET", "")
+    if not zoom_client_id or not zoom_client_secret:
+        return None
 
-    # Refresh OAuth token if expired
-    if account.token_expiry and account.token_expiry < datetime.utcnow():
-        if not account.refresh_token:
-            return None
-        zoom_client_id     = os.environ.get("ZOOM_OAUTH_CLIENT_ID", "")
-        zoom_client_secret = os.environ.get("ZOOM_OAUTH_CLIENT_SECRET", "")
-        creds = base64.b64encode(f"{zoom_client_id}:{zoom_client_secret}".encode()).decode()
-        r = _req.post(
-            "https://zoom.us/oauth/token",
-            params={"grant_type": "refresh_token", "refresh_token": account.refresh_token},
-            headers={"Authorization": f"Basic {creds}"},
-            timeout=10,
-        )
-        if r.status_code != 200:
-            return None
-        data = r.json()
-        upsert_connected_account(
-            user_id=user_id,
-            provider="zoom",
-            access_token=data["access_token"],
-            refresh_token=data.get("refresh_token", account.refresh_token),
-            token_expiry=datetime.utcnow() + timedelta(seconds=data.get("expires_in", 3600)),
-            email=account.email,
-        )
-        access_token = data["access_token"]
+    creds = base64.b64encode(f"{zoom_client_id}:{zoom_client_secret}".encode()).decode()
 
+    # Exchange refresh token for a fresh access token
+    r = _req.post(
+        "https://zoom.us/oauth/token",
+        params={"grant_type": "refresh_token", "refresh_token": refresh_token},
+        headers={"Authorization": f"Basic {creds}"},
+        timeout=10,
+    )
+    if r.status_code != 200:
+        return None
+    data = r.json()
+    access_token = data["access_token"]
+    if data.get("refresh_token"):
+        save_bot_config({"zoom_bot_refresh_token": data["refresh_token"]})
+
+    # Fetch the ZAK
     r = _req.get(
         "https://api.zoom.us/v2/users/me/token",
         params={"type": "zak"},
@@ -1169,10 +1165,9 @@ async def _prepare_and_join_zoom(page, meeting_url: str, bot_name: str, session_
 
     # Inject ZAK token so the bot joins as the authenticated Zoom user instead
     # of an anonymous guest — this bypasses reCAPTCHA on the web client form.
-    if user_id:
-        with suppress(Exception):
-            zak = await asyncio.get_event_loop().run_in_executor(None, _fetch_zoom_zak, user_id)
-            if zak:
+    with suppress(Exception):
+        zak = await asyncio.get_event_loop().run_in_executor(None, _fetch_zoom_zak)
+        if zak:
                 sep = "&" if "?" in initial_url else "?"
                 initial_url = f"{initial_url}{sep}zak={zak}"
                 _log(session_id, "Zoom join — ZAK token injected (authenticated join)")

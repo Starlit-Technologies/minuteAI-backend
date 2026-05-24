@@ -817,8 +817,10 @@ def _bot_config_response(cfg: dict) -> dict:
         "signed_in_name":     ps["signed_in_name"],
         "setup_running":      setup_running(),
         "session_cookies":    session_cookies_info(),
-        "bot_oauth_email":    cfg.get("bot_oauth_email", ""),
-        "has_bot_oauth":      bool(cfg.get("bot_refresh_token", "")),
+        "bot_oauth_email":       cfg.get("bot_oauth_email", ""),
+        "has_bot_oauth":         bool(cfg.get("bot_refresh_token", "")),
+        "zoom_bot_email":        cfg.get("zoom_bot_email", ""),
+        "has_zoom_bot_oauth":    bool(cfg.get("zoom_bot_refresh_token", "")),
     }
 
 
@@ -1075,4 +1077,84 @@ def admin_bot_oauth_callback(code: str = None, state: str = None, error: str = N
 def admin_bot_oauth_disconnect(_: User = Depends(get_admin_user)):
     """Remove the stored bot OAuth refresh token."""
     save_bot_config({"bot_refresh_token": "", "bot_oauth_email": ""})
+    return _bot_config_response(load_bot_config())
+
+
+# ── Bot Zoom OAuth ────────────────────────────────────────────────────────────
+
+ZOOM_CLIENT_ID     = os.environ.get("ZOOM_OAUTH_CLIENT_ID", "")
+ZOOM_CLIENT_SECRET = os.environ.get("ZOOM_OAUTH_CLIENT_SECRET", "")
+_ZOOM_AUTH_URL     = "https://zoom.us/oauth/authorize"
+_ZOOM_TOKEN_URL    = "https://zoom.us/oauth/token"
+
+
+@router.get("/bot-config/zoom-oauth/start")
+def admin_bot_zoom_oauth_start(_: User = Depends(get_admin_user)):
+    if not ZOOM_CLIENT_ID:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "ZOOM_OAUTH_CLIENT_ID is not configured.")
+    from jose import jwt as _jwt
+    state = _jwt.encode(
+        {"type": "bot_zoom_oauth", "exp": time.time() + 600},
+        JWT_SECRET, algorithm="HS256",
+    )
+    params = {
+        "client_id":     ZOOM_CLIENT_ID,
+        "redirect_uri":  f"{BACKEND_URL}/admin/bot-config/zoom-oauth/callback",
+        "response_type": "code",
+        "state":         state,
+    }
+    return {"url": f"{_ZOOM_AUTH_URL}?{urllib.parse.urlencode(params)}"}
+
+
+@router.get("/bot-config/zoom-oauth/callback")
+def admin_bot_zoom_oauth_callback(code: str = None, state: str = None, error: str = None):
+    admin_page = f"{ADMIN_URL.rstrip('/')}/bot-config"
+
+    if error or not code:
+        return RedirectResponse(f"{admin_page}?error=zoom_denied")
+
+    from jose import jwt as _jwt, JWTError
+    try:
+        payload = _jwt.decode(state or "", JWT_SECRET, algorithms=["HS256"])
+        if payload.get("type") != "bot_zoom_oauth":
+            raise JWTError
+    except JWTError:
+        return RedirectResponse(f"{admin_page}?error=invalid_state")
+
+    import base64, requests as _req
+    creds = base64.b64encode(f"{ZOOM_CLIENT_ID}:{ZOOM_CLIENT_SECRET}".encode()).decode()
+    token_res = _req.post(
+        _ZOOM_TOKEN_URL,
+        params={"grant_type": "authorization_code", "code": code,
+                "redirect_uri": f"{BACKEND_URL}/admin/bot-config/zoom-oauth/callback"},
+        headers={"Authorization": f"Basic {creds}"},
+        timeout=10,
+    )
+    if not token_res.ok:
+        return RedirectResponse(f"{admin_page}?error=zoom_token")
+
+    tokens        = token_res.json()
+    refresh_token = tokens.get("refresh_token", "")
+    access_token  = tokens.get("access_token", "")
+
+    email = None
+    if access_token:
+        info = _req.get(
+            "https://api.zoom.us/v2/users/me",
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=10,
+        )
+        if info.ok:
+            email = info.json().get("email")
+
+    updates: dict = {"zoom_bot_email": email or ""}
+    if refresh_token:
+        updates["zoom_bot_refresh_token"] = refresh_token
+    save_bot_config(updates)
+    return RedirectResponse(f"{admin_page}?connected=zoom")
+
+
+@router.delete("/bot-config/zoom-oauth")
+def admin_bot_zoom_oauth_disconnect(_: User = Depends(get_admin_user)):
+    save_bot_config({"zoom_bot_refresh_token": "", "zoom_bot_email": ""})
     return _bot_config_response(load_bot_config())
