@@ -1110,10 +1110,74 @@ async def _zoom_wait_for_name_form(page, session_id: str, timeout_seconds: int =
     return False
 
 
-async def _prepare_and_join_zoom(page, meeting_url: str, bot_name: str, session_id: str):
+def _fetch_zoom_zak(user_id: str) -> Optional[str]:
+    """Return a Zoom Access Key token for the user so the bot joins as an
+    authenticated account, bypassing reCAPTCHA on the web client."""
+    import base64
+    import requests as _req
+    from datetime import datetime, timedelta
+    from models.connected_account import get_connected_account, upsert_connected_account
+
+    account = get_connected_account(user_id, "zoom")
+    if not account or not account.access_token:
+        return None
+
+    access_token = account.access_token
+
+    # Refresh OAuth token if expired
+    if account.token_expiry and account.token_expiry < datetime.utcnow():
+        if not account.refresh_token:
+            return None
+        zoom_client_id     = os.environ.get("ZOOM_OAUTH_CLIENT_ID", "")
+        zoom_client_secret = os.environ.get("ZOOM_OAUTH_CLIENT_SECRET", "")
+        creds = base64.b64encode(f"{zoom_client_id}:{zoom_client_secret}".encode()).decode()
+        r = _req.post(
+            "https://zoom.us/oauth/token",
+            params={"grant_type": "refresh_token", "refresh_token": account.refresh_token},
+            headers={"Authorization": f"Basic {creds}"},
+            timeout=10,
+        )
+        if r.status_code != 200:
+            return None
+        data = r.json()
+        upsert_connected_account(
+            user_id=user_id,
+            provider="zoom",
+            access_token=data["access_token"],
+            refresh_token=data.get("refresh_token", account.refresh_token),
+            token_expiry=datetime.utcnow() + timedelta(seconds=data.get("expires_in", 3600)),
+            email=account.email,
+        )
+        access_token = data["access_token"]
+
+    r = _req.get(
+        "https://api.zoom.us/v2/users/me/token",
+        params={"type": "zak"},
+        headers={"Authorization": f"Bearer {access_token}"},
+        timeout=10,
+    )
+    if r.status_code == 200:
+        return r.json().get("token")
+    return None
+
+
+async def _prepare_and_join_zoom(page, meeting_url: str, bot_name: str, session_id: str,
+                                  user_id: str = ""):
     initial_url = _zoom_web_client_url(meeting_url) or meeting_url
     _log(session_id, f"Zoom join start — original: {meeting_url}")
     _log(session_id, f"Zoom join start — web client: {initial_url}")
+
+    # Inject ZAK token so the bot joins as the authenticated Zoom user instead
+    # of an anonymous guest — this bypasses reCAPTCHA on the web client form.
+    if user_id:
+        with suppress(Exception):
+            zak = await asyncio.get_event_loop().run_in_executor(None, _fetch_zoom_zak, user_id)
+            if zak:
+                sep = "&" if "?" in initial_url else "?"
+                initial_url = f"{initial_url}{sep}zak={zak}"
+                _log(session_id, "Zoom join — ZAK token injected (authenticated join)")
+            else:
+                _log(session_id, "Zoom join — no ZAK available, joining as guest")
 
     await page.goto(initial_url, wait_until="domcontentloaded", timeout=60000)
     _log(session_id, f"After goto — title: '{await page.title()}' url: {page.url}")
@@ -1761,7 +1825,7 @@ async def _run_playwright_session(ctx: BotRunContext):
                     await _take_debug_screenshot(page, ctx.session_id, "prejoin")
                     await _join_google_meet(page, ctx.session_id)
                 elif ctx.platform == "zoom":
-                    await _prepare_and_join_zoom(page, ctx.meeting_url, ctx.bot_name, ctx.session_id)
+                    await _prepare_and_join_zoom(page, ctx.meeting_url, ctx.bot_name, ctx.session_id, ctx.user_id)
                     await _take_debug_screenshot(page, ctx.session_id, "prejoin")
                 else:
                     raise RuntimeError(f"Unsupported platform: {ctx.platform}")
