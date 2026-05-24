@@ -264,10 +264,23 @@ class BotRunContext:
     meeting_url: str
     bot_name: str
     platform: str
-    source: str = ""   # "user_calendar", "manual", etc.
+    source: str = ""       # "user_calendar", "manual", etc.
+    user_name: str = ""    # display name of the user who booked the bot
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _get_user_display_name(user_id: str) -> str:
+    """Return the user's display name, or empty string if not found."""
+    try:
+        from models.user import User
+        from db.base import SessionLocal
+        with SessionLocal() as db:
+            user = db.get(User, user_id)
+            return (user.name or "").strip() if user else ""
+    except Exception:
+        return ""
+
 
 def _log(session_id: str, message: str):
     ts   = datetime.utcnow().strftime("%H:%M:%S")
@@ -328,10 +341,19 @@ async def _drain_audio_chunks(page, chunks_store: list, session_id: str):
     while True:
         await asyncio.sleep(10)
         try:
-            new = await page.evaluate("window.__maDrain ? window.__maDrain() : []")
-            if new:
-                chunks_store.extend(new)
-                _log(session_id, f"Drained {len(new)} audio chunk(s) ({len(chunks_store)} total)")
+            new_total = 0
+            # Drain from main frame and all child frames — Zoom creates WebRTC
+            # connections inside iframes so their audio lives in the iframe's context.
+            for frame in [page] + list(page.frames):
+                try:
+                    new = await frame.evaluate("window.__maDrain ? window.__maDrain() : []")
+                    if new:
+                        chunks_store.extend(new)
+                        new_total += len(new)
+                except Exception:
+                    pass
+            if new_total:
+                _log(session_id, f"Drained {new_total} audio chunk(s) ({len(chunks_store)} total)")
         except Exception as exc:
             _log(session_id, f"Audio drain error: {exc}")
             break
@@ -600,20 +622,6 @@ async def _sign_in_google_meet_as_bot(page, refresh_token: str, session_id: str)
         _log(session_id, f"Bot OAuth token refresh error: {exc}")
         return False
 
-    candidates = [
-        (
-            "MergeSession",
-            f"https://accounts.google.com/MergeSession"
-            f"?service=mail&continue=https://myaccount.google.com"
-            f"&token={access_token}&source=googletalkplugin"
-        ),
-        (
-            "OAuthLogin",
-            f"https://accounts.google.com/OAuthLogin"
-            f"?source=ogb&issuedTo={GOOGLE_CLIENT_ID}&token={access_token}"
-        ),
-    ]
-
     async def _is_signed_in_now() -> bool:
         try:
             cookies = await page.context.cookies(
@@ -623,10 +631,27 @@ async def _sign_in_google_meet_as_bot(page, refresh_token: str, session_id: str)
         except Exception:
             return False
 
+    # ── Step 2: try legacy sign-in endpoints (may still work for some accounts) ──
+    # Note: MergeSession/OAuthLogin are deprecated by Google. They are tried as a
+    # best-effort fallback. The recommended path is stored session cookies (Step 1).
+    candidates = [
+        (
+            "OAuthLogin",
+            f"https://accounts.google.com/OAuthLogin"
+            f"?source=ogb&issuedTo={GOOGLE_CLIENT_ID}&token={access_token}"
+        ),
+        (
+            "MergeSession",
+            f"https://accounts.google.com/MergeSession"
+            f"?service=mail&continue=https://myaccount.google.com"
+            f"&token={access_token}&source=googletalkplugin"
+        ),
+    ]
+
     for method, sign_in_url in candidates:
         try:
             await page.goto(sign_in_url, wait_until="domcontentloaded", timeout=20000)
-            await page.wait_for_timeout(2000)
+            await page.wait_for_timeout(2500)
             if await _is_signed_in_now():
                 _log(session_id, f"Bot OAuth sign-in confirmed via {method}")
                 return True
@@ -635,12 +660,20 @@ async def _sign_in_google_meet_as_bot(page, refresh_token: str, session_id: str)
             if "myaccount.google.com" in page.url and "signin" not in page.url:
                 _log(session_id, f"Bot OAuth sign-in confirmed via {method} (myaccount)")
                 return True
-            _log(session_id, f"[{method}] bot sign-in not confirmed")
+            _log(session_id, f"[{method}] bot sign-in not confirmed — url: {page.url!r}")
         except Exception as exc:
             _log(session_id, f"[{method}] bot sign-in attempt raised: {exc}")
 
-    _log(session_id, "Bot OAuth sign-in failed — joining as guest")
-    _flag_auth_failure("Bot OAuth sign-in failed. Session cookies may be expired. Re-export cookies or re-connect in Admin → Bot Config.")
+    _log(
+        session_id,
+        "Bot OAuth sign-in failed — MergeSession/OAuthLogin are deprecated by Google. "
+        "To fix: Admin → Bot Config → Export Cookies (locally) then Import Cookies on the server, "
+        "OR use the persistent browser profile setup. Joining as guest."
+    )
+    _flag_auth_failure(
+        "Bot Google sign-in failed. Google deprecated MergeSession/OAuthLogin. "
+        "Fix: export session cookies from Admin → Bot Config on the local machine and import them on the server."
+    )
     return False
 
 
@@ -1369,16 +1402,21 @@ async def _leave_meeting(page, platform: str):
 
 # ── Join announcement chat message ────────────────────────────────────────────
 
-_JOIN_MESSAGE = (
-    "👋 MinuteAI is here to record & take notes.\n"
-    "Type '/ff pause' to pause or '/ff stop' to stop recording.\n"
-    "Minutes will be available after the call."
-)
+def _build_join_message(user_name: str) -> str:
+    who = f"{user_name}'s " if user_name else ""
+    return (
+        f"👋 {who}MinuteAI Notetaker has joined to record & transcribe this meeting.\n"
+        "Type '/ff stop' to stop recording. Minutes will be available after the call."
+    )
 
-_LATECOMER_MESSAGE = (
-    "📝 Reminder: This meeting is being recorded by MinuteAI.\n"
-    "Minutes will be shared after the call."
-)
+
+def _build_latecomer_message(user_name: str) -> str:
+    who = f"{user_name}'s " if user_name else "a "
+    return (
+        f"📝 Reminder: This meeting is being recorded by {who}MinuteAI Notetaker.\n"
+        "Minutes will be shared after the call."
+    )
+
 
 # How long to wait before re-sending the announcement for latecomers (seconds).
 _LATECOMER_ANNOUNCE_DELAY = 180  # 3 minutes
@@ -1523,6 +1561,31 @@ async def _send_google_meet_chat(page, message: str, session_id: str):
 async def _send_zoom_chat(page, message: str, session_id: str):
     """Open the Zoom web-client chat panel and post a message. Silently skips on any error."""
     try:
+        # Reveal the auto-hiding Zoom toolbar by hovering over the bottom of the viewport.
+        vp = page.viewport_size or {"width": 1440, "height": 900}
+        cx, cy = vp["width"] // 2, vp["height"] // 2
+        with suppress(Exception):
+            await page.mouse.click(cx, cy)
+        await page.wait_for_timeout(600)
+        for y_frac in (0.85, 0.90, 0.95):
+            await page.mouse.move(cx, int(vp["height"] * y_frac))
+            await page.wait_for_timeout(300)
+        await page.wait_for_timeout(800)
+
+        # Wait up to 60 s for the chat button to appear (toolbar renders after meeting loads).
+        _ZOOM_CHAT_SELECTORS = (
+            'button[aria-label*="chat" i]',
+            'button[aria-label*="Chat" i]',
+            'button.footer-button-base__button--chat',
+            '[data-testid="chat-button"]',
+            '.footer-chat-button',
+        )
+        with suppress(Exception):
+            await page.wait_for_selector(
+                ", ".join(_ZOOM_CHAT_SELECTORS),
+                timeout=60000,
+            )
+
         # Open the chat panel — try common button selectors
         chat_opened = False
 
@@ -1545,13 +1608,10 @@ async def _send_zoom_chat(page, message: str, session_id: str):
         # CSS selector fallback for the chat toolbar button
         if not chat_opened:
             for frame in all_frames:
-                for selector in [
-                    'button[aria-label*="chat" i]',
-                    'button[aria-label*="Chat" i]',
+                for selector in _ZOOM_CHAT_SELECTORS + (
                     '.footer-button__chat-icon',
-                    '[data-testid="chat-button"]',
                     'button.footer-button-base__button[aria-label*="Chat"]',
-                ]:
+                ):
                     with suppress(Exception):
                         btn = frame.locator(selector).first
                         if await btn.is_visible(timeout=1000):
@@ -1563,7 +1623,37 @@ async def _send_zoom_chat(page, message: str, session_id: str):
                 if chat_opened:
                     break
 
+        # JS full-page scan — scans aria-label and textContent across all elements
         if not chat_opened:
+            with suppress(Exception):
+                clicked = await page.evaluate("""
+                    () => {
+                        const re = /^chat$/i;
+                        for (const el of document.querySelectorAll('button, [role="button"]')) {
+                            const label = (el.getAttribute('aria-label') || '').trim();
+                            const text  = (el.textContent || '').trim();
+                            if (re.test(label) || re.test(text)) {
+                                el.click();
+                                return label || text;
+                            }
+                        }
+                        return null;
+                    }
+                """)
+                if clicked:
+                    _log(session_id, f"Opened Zoom chat via JS scan ('{clicked}')")
+                    await page.wait_for_timeout(1500)
+                    chat_opened = True
+
+        if not chat_opened:
+            with suppress(Exception):
+                labels = await page.evaluate("""
+                    () => Array.from(document.querySelectorAll('button, [role="button"]'))
+                        .map(el => (el.getAttribute('aria-label') || el.textContent || '').trim())
+                        .filter(s => s.length > 0 && s.length < 80)
+                        .slice(0, 20)
+                """)
+                _log(session_id, f"Zoom toolbar buttons visible: {labels}")
             _log(session_id, "Zoom chat button not found — skipping announcement")
             return
 
@@ -1657,7 +1747,7 @@ async def _send_chat_message(page, message: str, session_id: str, platform: str)
         _log(session_id, f"Chat not supported for platform: {platform}")
 
 
-async def _schedule_recording_announcements(page, session_id: str, platform: str):
+async def _schedule_recording_announcements(page, session_id: str, platform: str, user_name: str = ""):
     """
     Send the recording announcement to the meeting chat:
     1. Immediately upon joining — notifies everyone currently in the call.
@@ -1668,7 +1758,7 @@ async def _schedule_recording_announcements(page, session_id: str, platform: str
     gracefully if the session is cancelled/ended or the bot leaves the meeting.
     """
     # ── Initial announcement ──────────────────────────────────────────────
-    await _send_chat_message(page, _JOIN_MESSAGE, session_id, platform)
+    await _send_chat_message(page, _build_join_message(user_name), session_id, platform)
 
     # ── Wait, then send the latecomer reminder ────────────────────────────
     # Sleep in small increments so we can bail out early if the session ends.
@@ -1698,7 +1788,7 @@ async def _schedule_recording_announcements(page, session_id: str, platform: str
         return
 
     _log(session_id, "Sending latecomer recording reminder")
-    await _send_chat_message(page, _LATECOMER_MESSAGE, session_id, platform)
+    await _send_chat_message(page, _build_latecomer_message(user_name), session_id, platform)
 
 
 # ── Main Playwright session ───────────────────────────────────────────────────
@@ -1847,7 +1937,7 @@ async def _run_playwright_session(ctx: BotRunContext):
 
                 # Send recording announcements in the background (initial + latecomer reminder)
                 announce_task = asyncio.create_task(
-                    _schedule_recording_announcements(page, ctx.session_id, ctx.platform)
+                    _schedule_recording_announcements(page, ctx.session_id, ctx.platform, ctx.user_name)
                 )
 
                 drain_task     = asyncio.create_task(_drain_audio_chunks(page, audio_chunks, ctx.session_id))
@@ -1883,14 +1973,21 @@ async def _run_playwright_session(ctx: BotRunContext):
                         pass
                 unregister_bot_audio_listener(ctx.session_id)
 
-                with suppress(Exception):
-                    await page.evaluate("if (window.__maStop) window.__maStop()")
+                # Stop recorder and do final drain across all frames
+                all_frames = [page] + list(page.frames) if page else []
+                for frame in all_frames:
+                    with suppress(Exception):
+                        await frame.evaluate("if (window.__maStop) window.__maStop()")
                 with suppress(Exception):
                     await page.wait_for_timeout(1500)
-                with suppress(Exception):
-                    final = await page.evaluate("window.__maDrain ? window.__maDrain() : []")
-                    audio_chunks.extend(final)
-                    _log(ctx.session_id, f"Final drain: {len(final)} chunk(s), total {len(audio_chunks)}")
+                final_total = 0
+                for frame in all_frames:
+                    with suppress(Exception):
+                        final = await frame.evaluate("window.__maDrain ? window.__maDrain() : []")
+                        if final:
+                            audio_chunks.extend(final)
+                            final_total += len(final)
+                _log(ctx.session_id, f"Final drain: {final_total} chunk(s), total {len(audio_chunks)}")
 
                 if page is not None:
                     with suppress(Exception):
@@ -2022,6 +2119,7 @@ def _run_session_inner(session_id: str):
         bot_name=session.bot_name or MEETING_BOT_RECORDER_NAME,
         platform=platform,
         source=session.source or "",
+        user_name=_get_user_display_name(session.user_id),
     )
     try:
         asyncio.run(_run_playwright_session(ctx))
