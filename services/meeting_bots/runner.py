@@ -1288,15 +1288,24 @@ _LATECOMER_ANNOUNCE_DELAY = 180  # 3 minutes
 async def _send_google_meet_chat(page, message: str, session_id: str):
     """Open the chat panel and post a message. Silently skips on any error."""
     try:
-        # Hover over the page to reveal the auto-hiding toolbar
-        await page.mouse.move(720, 450)
+        # Reveal the auto-hiding toolbar: click centre of page, then move to toolbar area.
+        vp = page.viewport_size or {"width": 1280, "height": 720}
+        cx, cy = vp["width"] // 2, vp["height"] // 2
+        # Click the centre to focus the page and wake the toolbar
+        with suppress(Exception):
+            await page.mouse.click(cx, cy)
+        await page.wait_for_timeout(600)
+        # Move toward the bottom toolbar area where chat icons live
+        for y_frac in (0.85, 0.90, 0.95):
+            await page.mouse.move(cx, int(vp["height"] * y_frac))
+            await page.wait_for_timeout(300)
         await page.wait_for_timeout(800)
 
         # Open chat panel — aria-label varies across Meet versions
         chat_opened = False
         for label in [
             "Chat with everyone", "In-call messages", "Chat", "Messages",
-            "Open chat", "Chat and captions",
+            "Open chat", "Chat and captions", "People and chat",
         ]:
             with suppress(Exception):
                 btn = page.get_by_role("button", name=label, exact=False).first
@@ -1307,15 +1316,17 @@ async def _send_google_meet_chat(page, message: str, session_id: str):
                     _log(session_id, f"Opened chat panel via '{label}' button")
                     break
 
-        # JS fallback: scan all buttons for anything chat-related
+        # JS fallback: broader scan — aria-label, title, data-tooltip, textContent
         if not chat_opened:
             with suppress(Exception):
                 clicked = await page.evaluate("""
                     () => {
                         const re = /chat|messages|in-call/i;
+                        const attrs = ['aria-label', 'title', 'data-tooltip', 'data-panel-id'];
                         for (const el of document.querySelectorAll('button, [role="button"]')) {
-                            const s = (el.getAttribute('aria-label') || el.textContent || '').trim();
-                            if (re.test(s)) { el.click(); return s; }
+                            const s = attrs.map(a => el.getAttribute(a) || '').join(' ')
+                                      + ' ' + (el.textContent || '');
+                            if (re.test(s.trim())) { el.click(); return s.trim().slice(0, 60); }
                         }
                         return null;
                     }
@@ -1326,6 +1337,15 @@ async def _send_google_meet_chat(page, message: str, session_id: str):
                     chat_opened = True
 
         if not chat_opened:
+            # Log all visible button labels to help diagnose future failures
+            with suppress(Exception):
+                labels = await page.evaluate("""
+                    () => Array.from(document.querySelectorAll('button, [role="button"]'))
+                        .map(el => (el.getAttribute('aria-label') || el.textContent || '').trim())
+                        .filter(s => s.length > 0 && s.length < 80)
+                        .slice(0, 20)
+                """)
+                _log(session_id, f"Visible buttons: {labels}")
             _log(session_id, "Chat panel button not found — skipping announcement")
             return
 
