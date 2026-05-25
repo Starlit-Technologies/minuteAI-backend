@@ -89,6 +89,16 @@ def _user_workspace(user_id: str) -> Optional[str]:
         return ws.id if ws else None
 
 
+def _workspace_bot_name(workspace_id: Optional[str]) -> str:
+    if not workspace_id:
+        return "MinuteAI Recorder"
+    from models.bot_account import BotAccountRecord
+    from db.base import SessionLocal
+    with SessionLocal() as db:
+        rec = db.query(BotAccountRecord).filter(BotAccountRecord.workspace_id == workspace_id).first()
+        return rec.display_name if rec and rec.display_name else "MinuteAI Recorder"
+
+
 def _parse_time(value: Optional[str]) -> Optional[datetime]:
     if not value:
         return None
@@ -187,7 +197,7 @@ def _sync_google(account: ConnectedAccount):
         session = create_session(
             user_id=account.user_id, workspace_id=workspace_id,
             platform="google_meet", meeting_url=meeting_url,
-            bot_name="MinuteAI Recorder", calendar_event_id=event_id,
+            bot_name=_workspace_bot_name(workspace_id), calendar_event_id=event_id,
             source="user_calendar", title=event.get("summary") or "Meeting",
             scheduled_for=scheduled, duration_minutes=duration,
             attendees=attendees or None,
@@ -234,7 +244,7 @@ def _sync_zoom(account: ConnectedAccount):
         session = create_session(
             user_id=account.user_id, workspace_id=workspace_id,
             platform="zoom", meeting_url=join_url,
-            bot_name="MinuteAI Recorder", calendar_event_id=event_id,
+            bot_name=_workspace_bot_name(workspace_id), calendar_event_id=event_id,
             source="user_calendar", title=meeting.get("topic") or "Zoom Meeting",
             scheduled_for=scheduled, duration_minutes=meeting.get("duration"),
         )

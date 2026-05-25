@@ -24,7 +24,7 @@ JWT_SECRET           = os.environ.get("JWT_SECRET", "dev_secret")
 
 _GOOGLE_AUTH_URL  = "https://accounts.google.com/o/oauth2/v2/auth"
 _GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
-_BOT_OAUTH_SCOPES = "openid email"
+_BOT_OAUTH_SCOPES = "openid email https://www.googleapis.com/auth/calendar.readonly"
 from models.job import JobRecord
 from models.notification import NotificationRecord
 from models.task import TaskRecord
@@ -817,10 +817,11 @@ def _bot_config_response(cfg: dict) -> dict:
         "signed_in_name":     ps["signed_in_name"],
         "setup_running":      setup_running(),
         "session_cookies":    session_cookies_info(),
-        "bot_oauth_email":       cfg.get("bot_oauth_email", ""),
-        "has_bot_oauth":         bool(cfg.get("bot_refresh_token", "")),
-        "zoom_bot_email":        cfg.get("zoom_bot_email", ""),
-        "has_zoom_bot_oauth":    bool(cfg.get("zoom_bot_refresh_token", "")),
+        "bot_oauth_email":           cfg.get("bot_oauth_email", ""),
+        "has_bot_oauth":             bool(cfg.get("bot_refresh_token", "")),
+        "bot_oauth_has_calendar":    bool(cfg.get("bot_oauth_calendar_scope", False)),
+        "zoom_bot_email":            cfg.get("zoom_bot_email", ""),
+        "has_zoom_bot_oauth":        bool(cfg.get("zoom_bot_refresh_token", "")),
     }
 
 
@@ -1065,7 +1066,10 @@ def admin_bot_oauth_callback(code: str = None, state: str = None, error: str = N
         if info.ok:
             email = info.json().get("email")
 
-    updates: dict = {"bot_oauth_email": email or ""}
+    updates: dict = {
+        "bot_oauth_email": email or "",
+        "bot_oauth_calendar_scope": True,
+    }
     if refresh_token:
         updates["bot_refresh_token"] = refresh_token
 
@@ -1076,7 +1080,7 @@ def admin_bot_oauth_callback(code: str = None, state: str = None, error: str = N
 @router.delete("/bot-config/google-oauth")
 def admin_bot_oauth_disconnect(_: User = Depends(get_admin_user)):
     """Remove the stored bot OAuth refresh token."""
-    save_bot_config({"bot_refresh_token": "", "bot_oauth_email": ""})
+    save_bot_config({"bot_refresh_token": "", "bot_oauth_email": "", "bot_oauth_calendar_scope": False})
     return _bot_config_response(load_bot_config())
 
 

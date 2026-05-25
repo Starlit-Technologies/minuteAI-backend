@@ -443,6 +443,36 @@ def subscribe_to_plan(
     return {"status": "active", "subscription_id": sub.id}
 
 
+@router.post("/cancel")
+def cancel_subscription(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    sub_id = current_user.stripe_subscription_id
+    if not sub_id or not stripe.api_key:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "No active subscription found.")
+    try:
+        sub = stripe.Subscription.modify(sub_id, cancel_at_period_end=True)
+        return {"ok": True, "cancel_at_period_end": sub.cancel_at_period_end, "cancel_at": sub.cancel_at}
+    except stripe.error.StripeError as e:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(e))
+
+
+@router.post("/renew")
+def renew_subscription(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    sub_id = current_user.stripe_subscription_id
+    if not sub_id or not stripe.api_key:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "No active subscription found.")
+    try:
+        sub = stripe.Subscription.modify(sub_id, cancel_at_period_end=False)
+        return {"ok": True, "cancel_at_period_end": sub.cancel_at_period_end}
+    except stripe.error.StripeError as e:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(e))
+
+
 @router.post("/webhook")
 async def stripe_webhook(request: Request, db: Session = Depends(get_db)):
     payload = await request.body()

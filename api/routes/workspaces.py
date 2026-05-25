@@ -227,13 +227,19 @@ def get_workspace_bot(
     if not bot:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Recorder bot account not found.")
     result = bot_dict(bot)
-    # Override with the real Google account email configured in the admin bot setup
+    # Override with the real bot email configured in the admin panel.
+    # Priority: Chrome-profile signed-in email > OAuth-connected email > manually typed email.
     try:
         from models.bot_config import load_bot_config, profile_status as _profile_status
         cfg = load_bot_config()
         ps = _profile_status(cfg)
-        if ps.get("signed_in_email"):
-            result["email"] = ps["signed_in_email"]
+        email_override = (
+            ps.get("signed_in_email")
+            or cfg.get("bot_oauth_email")
+            or cfg.get("email")
+        )
+        if email_override:
+            result["email"] = email_override
     except Exception:
         pass
     return result
