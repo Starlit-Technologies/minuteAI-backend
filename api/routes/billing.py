@@ -402,21 +402,49 @@ def subscribe_to_plan(
             if not payment_method_id:
                 raise HTTPException(status.HTTP_400_BAD_REQUEST, "Add a payment method before upgrading.")
 
-        sub_kwargs: dict = {
-            "customer": customer_id,
-            "items": [{"price": price.id}],
-            "default_payment_method": payment_method_id,
-            "payment_behavior": "default_incomplete",
-            "payment_settings": {"save_default_payment_method": "on_subscription"},
-            "expand": ["latest_invoice.payment_intent"],
-            "metadata": {"user_id": current_user.id},
-        }
+        # Build shared discount kwargs
+        discount_kwargs: dict = {}
         if body.promo_code:
             promo = svc.validate_promo_code(db, body.promo_code)
-            sub_kwargs["discounts"] = [svc.build_checkout_discount(promo, price)]
-            sub_kwargs["metadata"]["promo_code"] = promo.code
+            discount_kwargs["discounts"] = [svc.build_checkout_discount(promo, price)]
 
-        sub = stripe.Subscription.create(**sub_kwargs)
+        # If the user already has a subscription, modify it rather than creating a
+        # new one — Stripe locks a customer to the currency of their first subscription
+        # and will reject any attempt to add a second subscription in a different currency.
+        sub = None
+        existing_sub_id = current_user.stripe_subscription_id
+        if existing_sub_id:
+            existing_sub = stripe.Subscription.retrieve(
+                existing_sub_id,
+                expand=["items.data.price", "latest_invoice.payment_intent"],
+            )
+            if existing_sub.status in ("active", "trialing", "past_due"):
+                item_id = existing_sub["items"]["data"][0]["id"]
+                sub = stripe.Subscription.modify(
+                    existing_sub_id,
+                    items=[{"id": item_id, "price": price.id}],
+                    default_payment_method=payment_method_id,
+                    payment_behavior="default_incomplete",
+                    payment_settings={"save_default_payment_method": "on_subscription"},
+                    proration_behavior="create_prorations",
+                    expand=["latest_invoice.payment_intent"],
+                    metadata={"user_id": current_user.id},
+                    **discount_kwargs,
+                )
+
+        if sub is None:
+            sub_kwargs: dict = {
+                "customer": customer_id,
+                "items": [{"price": price.id}],
+                "default_payment_method": payment_method_id,
+                "payment_behavior": "default_incomplete",
+                "payment_settings": {"save_default_payment_method": "on_subscription"},
+                "expand": ["latest_invoice.payment_intent"],
+                "metadata": {"user_id": current_user.id},
+                **discount_kwargs,
+            }
+            sub = stripe.Subscription.create(**sub_kwargs)
+
     except stripe.error.CardError as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, e.user_message or "Card declined.")
     except stripe.error.StripeError as e:
