@@ -154,7 +154,11 @@ def _transcribe_assemblyai(job: Job, on_partial) -> tuple[str, bool, str]:
 
     Returns (diarized_transcript_text, is_temp, audio_path_or_empty).
     """
-    from services.transcription_assemblyai import transcribe_with_diarization, format_diarized_transcript
+    from services.transcription_assemblyai import (
+        transcribe_with_diarization,
+        format_diarized_transcript,
+        transcript_segments,
+    )
 
     lang = (job.job_config or {}).get("audio_language") or None
     audio_source = None
@@ -185,6 +189,10 @@ def _transcribe_assemblyai(job: Job, on_partial) -> tuple[str, bool, str]:
         secs = int(result.audio_duration_s % 60)
         config["_audio_duration"] = f"{mins}m {secs}s"
         store.update(job.id, job_config=config)
+
+    segments = transcript_segments(result)
+    if segments:
+        store.update(job.id, transcript_segments=segments)
 
     diarized_text = format_diarized_transcript(result)
     return diarized_text, is_temp, local_path
@@ -324,10 +332,7 @@ def run_pipeline(job_id: str):
                 link=f"/results/{job_id}",
             )
 
-        if job.email:
-            send_minutes_ready(job.email, job_id, minutes.get("title", "Meeting"))
-
-        # Email all meeting attendees (stored from calendar event)
+        # Resolve owner name/email for emails
         cfg          = job.job_config or {}
         attendees    = cfg.get("attendees") or []
         owner_email  = job.email or ""
@@ -344,6 +349,16 @@ def run_pipeline(job_id: str):
             except Exception:
                 pass
 
+        if job.email:
+            send_minutes_ready(
+                job.email,
+                job_id,
+                minutes.get("title", "Meeting"),
+                minutes=minutes,
+                user_name=owner_name,
+                user_email=owner_email,
+            )
+
         if attendees:
             from services.email import send_attendee_recap
             for addr in attendees:
@@ -356,6 +371,7 @@ def run_pipeline(job_id: str):
                         meeting_title=meeting_title,
                         recorded_by_name=owner_name,
                         recorded_by_email=owner_email,
+                        minutes=minutes,
                     )
                 except Exception:
                     pass
@@ -374,4 +390,3 @@ def run_pipeline(job_id: str):
                 os.unlink(_tmp_audio)
             except OSError:
                 pass
-
