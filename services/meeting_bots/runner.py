@@ -1683,30 +1683,75 @@ async def _send_zoom_chat(page, message: str, session_id: str):
             _log(session_id, "Zoom chat button not found — skipping announcement")
             return
 
-        # Find the chat input across frames
+        # Give the chat panel extra time to fully render before looking for the input
+        await page.wait_for_timeout(3000)
+
+        # Find the chat input across frames — ordered by most-likely-to-match first
         chat_input = None
         target_frame = page
+        _CHAT_INPUT_SELECTORS = [
+            # Modern Zoom web client (contenteditable div)
+            'div[contenteditable="true"]',
+            'div[contenteditable="true"][aria-label*="chat" i]',
+            'div[contenteditable="true"][aria-label*="message" i]',
+            'div[contenteditable="true"][data-placeholder]',
+            # Legacy textarea selectors
+            'textarea[aria-label*="message" i]',
+            'textarea[aria-label*="chat" i]',
+            'textarea[placeholder*="message" i]',
+            'textarea[placeholder*="Type message" i]',
+            # Data-testid selectors
+            '[data-testid="chat-input"]',
+            '[data-testid="message-input"]',
+            # Class-based selectors
+            '#chat-input',
+            '.chat-box textarea',
+            '.chat-box input',
+            '.chat-message-input',
+            '.chat-input__text',
+            '.chat-input',
+            '[class*="chat"] div[contenteditable]',
+            '[class*="message"] div[contenteditable]',
+        ]
         for frame in all_frames:
-            for selector in [
-                'textarea[aria-label*="message" i]',
-                'textarea[aria-label*="chat" i]',
-                'textarea[placeholder*="message" i]',
-                'textarea[placeholder*="Type message" i]',
-                'div[contenteditable="true"][aria-label*="chat" i]',
-                'div[contenteditable="true"][aria-label*="message" i]',
-                '#chat-input',
-                '.chat-box textarea',
-                '.chat-box input',
-                'div[contenteditable="true"]',
-            ]:
+            for selector in _CHAT_INPUT_SELECTORS:
                 with suppress(Exception):
                     el = frame.locator(selector).last
-                    if await el.is_visible(timeout=1500):
+                    if await el.is_visible(timeout=800):
                         chat_input = el
                         target_frame = frame
                         break
             if chat_input:
                 break
+
+        # JS fallback — dump what contenteditable/input elements exist, then use the first visible one
+        if not chat_input:
+            with suppress(Exception):
+                handle = await page.evaluate_handle("""
+                    () => {
+                        const candidates = [
+                            ...document.querySelectorAll('div[contenteditable="true"]'),
+                            ...document.querySelectorAll('textarea'),
+                            ...document.querySelectorAll('input[type="text"]'),
+                        ];
+                        for (const el of candidates) {
+                            const r = el.getBoundingClientRect();
+                            if (r.width > 50 && r.height > 10) return el;
+                        }
+                        return null;
+                    }
+                """)
+                element = handle.as_element()
+                if element:
+                    chat_input = page.locator(':focus').first  # we'll click by JS instead
+                    # Use JS to type directly since we have the element handle
+                    await page.evaluate("el => el.focus()", element)
+                    await page.wait_for_timeout(300)
+                    await page.keyboard.type(message)
+                    await page.wait_for_timeout(400)
+                    await page.keyboard.press("Enter")
+                    _log(session_id, "Zoom chat message sent via JS element handle")
+                    return
 
         if not chat_input:
             _log(session_id, "Zoom chat input not found — skipping announcement")
