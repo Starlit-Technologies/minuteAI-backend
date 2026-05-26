@@ -1683,49 +1683,84 @@ async def _send_zoom_chat(page, message: str, session_id: str):
             _log(session_id, "Zoom chat button not found — skipping announcement")
             return
 
-        # Give the chat panel extra time to fully render before looking for the input
-        await page.wait_for_timeout(3000)
-
-        # Find the chat input across frames — ordered by most-likely-to-match first
-        chat_input = None
-        target_frame = page
+        # The chat panel may load lazily in a new iframe — re-capture frames after a delay.
+        # Also wait for any contenteditable/textarea to appear rather than a flat sleep.
         _CHAT_INPUT_SELECTORS = [
-            # Modern Zoom web client (contenteditable div)
-            'div[contenteditable="true"]',
-            'div[contenteditable="true"][aria-label*="chat" i]',
             'div[contenteditable="true"][aria-label*="message" i]',
+            'div[contenteditable="true"][aria-label*="chat" i]',
             'div[contenteditable="true"][data-placeholder]',
-            # Legacy textarea selectors
+            'div[contenteditable="true"]',
             'textarea[aria-label*="message" i]',
             'textarea[aria-label*="chat" i]',
             'textarea[placeholder*="message" i]',
             'textarea[placeholder*="Type message" i]',
-            # Data-testid selectors
+            'textarea[placeholder*="chat" i]',
             '[data-testid="chat-input"]',
             '[data-testid="message-input"]',
-            # Class-based selectors
+            '.chat-message-input div[contenteditable]',
+            '.chat-input__text',
+            '.chat-input',
             '#chat-input',
             '.chat-box textarea',
             '.chat-box input',
-            '.chat-message-input',
-            '.chat-input__text',
-            '.chat-input',
-            '[class*="chat"] div[contenteditable]',
-            '[class*="message"] div[contenteditable]',
+            '[class*="chatInput"] div[contenteditable]',
+            '[class*="chat-input"] div[contenteditable]',
+            '[class*="message-input"] div[contenteditable]',
         ]
+        _INPUT_COMBINED = ", ".join(_CHAT_INPUT_SELECTORS[:6])
+
+        # Wait up to 10 s for any chat input to appear in the main frame
+        with suppress(Exception):
+            await page.wait_for_selector(_INPUT_COMBINED, timeout=10000)
+
+        # Re-capture frames (chat panel may have loaded a new iframe after the button click)
+        all_frames = [page] + list(page.frames)
+
+        # Log frame URLs to help diagnose cross-origin iframe issues
+        frame_urls = [f.url for f in page.frames if f.url and f.url != "about:blank"]
+        if len(frame_urls) > 1:
+            _log(session_id, f"Zoom frames detected: {frame_urls}")
+
+        chat_input = None
+        target_frame = page
         for frame in all_frames:
             for selector in _CHAT_INPUT_SELECTORS:
                 with suppress(Exception):
                     el = frame.locator(selector).last
-                    if await el.is_visible(timeout=800):
+                    if await el.is_visible(timeout=600):
                         chat_input = el
                         target_frame = frame
+                        _log(session_id, f"Zoom chat input found: {selector} in {frame.url or 'main'}")
                         break
             if chat_input:
                 break
 
-        # JS fallback — dump what contenteditable/input elements exist, then use the first visible one
+        # JS fallback — scan all visible contenteditable/textarea in the main document
         if not chat_input:
+            with suppress(Exception):
+                # Log diagnostics: what editable elements exist right now?
+                diag = await page.evaluate("""
+                    () => {
+                        const els = [
+                            ...document.querySelectorAll('div[contenteditable]'),
+                            ...document.querySelectorAll('textarea'),
+                        ];
+                        return els.map(el => {
+                            const r = el.getBoundingClientRect();
+                            return {
+                                tag: el.tagName,
+                                ce: el.contentEditable,
+                                cls: el.className.slice(0, 60),
+                                aria: el.getAttribute('aria-label') || '',
+                                ph: el.getAttribute('placeholder') || el.getAttribute('data-placeholder') || '',
+                                vis: r.width > 10 && r.height > 10,
+                                w: Math.round(r.width), h: Math.round(r.height),
+                            };
+                        });
+                    }
+                """)
+                _log(session_id, f"Zoom editable elements: {diag}")
+
             with suppress(Exception):
                 handle = await page.evaluate_handle("""
                     () => {
@@ -1743,8 +1778,6 @@ async def _send_zoom_chat(page, message: str, session_id: str):
                 """)
                 element = handle.as_element()
                 if element:
-                    chat_input = page.locator(':focus').first  # we'll click by JS instead
-                    # Use JS to type directly since we have the element handle
                     await page.evaluate("el => el.focus()", element)
                     await page.wait_for_timeout(300)
                     await page.keyboard.type(message)
