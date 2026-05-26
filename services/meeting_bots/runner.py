@@ -1686,6 +1686,9 @@ async def _send_zoom_chat(page, message: str, session_id: str):
         # The chat panel may load lazily in a new iframe — re-capture frames after a delay.
         # Also wait for any contenteditable/textarea to appear rather than a flat sleep.
         _CHAT_INPUT_SELECTORS = [
+            # Quill.js editor — Zoom PWA newChatSwitchEnabled (v7+)
+            '.ql-editor[contenteditable="true"]',
+            '.ql-editor',
             'div[contenteditable="true"][aria-label*="message" i]',
             'div[contenteditable="true"][aria-label*="chat" i]',
             'div[contenteditable="true"][data-placeholder]',
@@ -1707,7 +1710,7 @@ async def _send_zoom_chat(page, message: str, session_id: str):
             '[class*="chat-input"] div[contenteditable]',
             '[class*="message-input"] div[contenteditable]',
         ]
-        _INPUT_COMBINED = ", ".join(_CHAT_INPUT_SELECTORS[:6])
+        _INPUT_COMBINED = ", ".join(_CHAT_INPUT_SELECTORS[:8])
 
         # Wait up to 10 s for any chat input to appear in the main frame
         with suppress(Exception):
