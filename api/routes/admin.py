@@ -805,6 +805,29 @@ class BotConfigUpdateIn(BaseModel):
     bot_name: Optional[str] = None
 
 
+class AppConfigUpdateIn(BaseModel):
+    intro_video_url: Optional[str] = None
+
+
+def _app_config_response(cfg: dict) -> dict:
+    return {
+        "intro_video_url": cfg.get("intro_video_url", ""),
+    }
+
+
+@router.get("/app-config")
+def admin_get_app_config(_: User = Depends(get_admin_user)):
+    return _app_config_response(load_bot_config())
+
+
+@router.patch("/app-config")
+def admin_update_app_config(body: AppConfigUpdateIn, _: User = Depends(get_admin_user)):
+    updates = {}
+    if body.intro_video_url is not None:
+        updates["intro_video_url"] = body.intro_video_url.strip()
+    return _app_config_response(save_bot_config(updates))
+
+
 def _bot_config_response(cfg: dict) -> dict:
     ps = profile_status(cfg)
     return {

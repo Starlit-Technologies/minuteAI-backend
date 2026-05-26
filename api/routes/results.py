@@ -29,6 +29,19 @@ def _apply_speaker_map(obj, speaker_map: dict):
     return obj
 
 
+def _apply_speaker_map_to_segments(segments: list[dict] | None, speaker_map: dict) -> list[dict]:
+    if not segments:
+        return []
+    mapped = []
+    for segment in segments:
+        item = dict(segment)
+        speaker = item.get("speaker")
+        if speaker_map and speaker in speaker_map and speaker_map[speaker]:
+            item["speaker"] = speaker_map[speaker]
+        mapped.append(item)
+    return mapped
+
+
 def _extract_speakers(transcript: str) -> list[dict]:
     """
     Parse 'Speaker X: utterance' lines from the stored transcript.
@@ -64,6 +77,8 @@ def get_results(job_id: str):
     result = _apply_speaker_map(dict(job.minutes or {}), speaker_map)
     if job.transcript:
         result["transcript"] = _apply_speaker_map(job.transcript, speaker_map)
+    if job.transcript_segments:
+        result["transcript_segments"] = _apply_speaker_map_to_segments(job.transcript_segments, speaker_map)
     result["speaker_map"] = speaker_map
     result["has_audio"] = bool(job.audio_path or job.r2_audio_key)
     return result
@@ -82,6 +97,10 @@ def get_speakers(job_id: str, current_user: User = Depends(get_current_user)):
 
 class SpeakerMapIn(BaseModel):
     speaker_map: dict[str, str]
+
+
+class TranscriptIn(BaseModel):
+    transcript: str
 
 
 class ShareIn(BaseModel):
@@ -149,3 +168,20 @@ def apply_speaker_names(
     store.update(job_id, speaker_map=clean_map if clean_map else None)
 
     return {"speaker_map": clean_map}
+
+
+@router.patch("/results/{job_id}/transcript")
+def update_transcript(
+    job_id: str,
+    body: TranscriptIn,
+    current_user: User = Depends(get_current_user),
+):
+    job = store.get(job_id)
+    if not job or job.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    if job.status != "done":
+        raise HTTPException(status_code=400, detail="Meeting is not ready yet.")
+
+    transcript = body.transcript.strip()
+    store.update(job_id, transcript=transcript or None, transcript_segments=None)
+    return {"transcript": transcript}

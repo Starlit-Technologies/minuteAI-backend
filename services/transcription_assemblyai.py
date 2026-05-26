@@ -173,3 +173,17 @@ def format_diarized_transcript(result: TranscriptResult) -> str:
     for u in result.utterances:
         lines.append(f"{u.speaker}: {u.text}")
     return "\n".join(lines)
+
+
+def transcript_segments(result: TranscriptResult) -> list[dict]:
+    """Return JSON-safe timed transcript segments for audio sync."""
+    return [
+        {
+            "speaker": u.speaker,
+            "text": u.text,
+            "start": round((u.start_ms or 0) / 1000, 3),
+            "end": round((u.end_ms or 0) / 1000, 3),
+            "confidence": u.confidence,
+        }
+        for u in result.utterances
+    ]

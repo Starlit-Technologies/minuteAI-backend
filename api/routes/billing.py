@@ -15,6 +15,21 @@ stripe.api_key = os.environ.get("STRIPE_SECRET_KEY", "")
 APP_URL        = os.environ.get("APP_URL", "http://localhost:5174")
 
 
+def _format_currency(code: str | None) -> str:
+    return (code or "usd").upper()
+
+
+def _currency_mismatch_message(current_currency: str | None, target_currency: str | None) -> str:
+    return (
+        "This customer already has a subscription in "
+        f"{_format_currency(current_currency)}, but the selected plan is priced in "
+        f"{_format_currency(target_currency)}. Stripe does not allow changing an "
+        "active subscription to a different currency. Use a Stripe Price in the "
+        "same currency for this plan, or cancel the existing subscription before "
+        "subscribing again."
+    )
+
+
 @router.get("/plans")
 def list_plans(db: Session = Depends(get_db)):
     import json as _json
@@ -419,6 +434,15 @@ def subscribe_to_plan(
                 expand=["items.data.price", "latest_invoice.payment_intent"],
             )
             if existing_sub.status in ("active", "trialing", "past_due"):
+                current_price = existing_sub["items"]["data"][0]["price"]
+                current_currency = (getattr(current_price, "currency", None) or "").lower()
+                target_currency = (getattr(price, "currency", None) or "").lower()
+                if current_currency and target_currency and current_currency != target_currency:
+                    raise HTTPException(
+                        status.HTTP_400_BAD_REQUEST,
+                        _currency_mismatch_message(current_currency, target_currency),
+                    )
+
                 item_id = existing_sub["items"]["data"][0]["id"]
                 sub = stripe.Subscription.modify(
                     existing_sub_id,
@@ -448,6 +472,12 @@ def subscribe_to_plan(
     except stripe.error.CardError as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, e.user_message or "Card declined.")
     except stripe.error.StripeError as e:
+        message = str(e)
+        if "doesn't match the expected currency" in message or "does not match the expected currency" in message:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "Stripe rejected this subscription because the selected plan currency does not match the customer's existing billing currency. Use a matching Stripe Price for this plan or cancel the existing subscription first.",
+            )
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(e))
 
     invoice = sub.latest_invoice

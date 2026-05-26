@@ -32,6 +32,7 @@ from api.routes.ai_live import router as ai_live_router
 from api.routes.consent import router as consent_router
 from api.routes.pdf_audio import router as pdf_audio_router
 from api.routes.threads import router as threads_router
+from api.routes.config import router as config_router
 
 from models.job import store
 from db.init_db import create_tables, run_migrations, recover_stuck_jobs, recover_stuck_bot_sessions, seed_default_workspaces
@@ -99,6 +100,7 @@ app.include_router(ai_live_router)
 app.include_router(consent_router)
 app.include_router(pdf_audio_router)
 app.include_router(threads_router)
+app.include_router(config_router)
 
 
 @app.on_event("startup")

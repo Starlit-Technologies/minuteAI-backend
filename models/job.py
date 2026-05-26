@@ -21,6 +21,7 @@ class JobRecord(Base):
     audio_path   = Column(String,  nullable=True)
     r2_audio_key = Column(String,  nullable=True)
     transcript      = Column(Text,    nullable=True)
+    transcript_segments_json = Column(Text, nullable=True)
     minutes_json    = Column(Text,    nullable=True)
     speaker_map_json = Column(Text,   nullable=True)
     docx_path       = Column(String,  nullable=True)
@@ -41,6 +42,7 @@ class Job:
     audio_path: Optional[str] = None
     r2_audio_key: Optional[str] = None
     transcript: Optional[str] = None
+    transcript_segments: Optional[list] = None
     minutes: Optional[dict] = None
     speaker_map: Optional[dict] = None
     docx_path: Optional[str] = None
@@ -59,6 +61,7 @@ def _record_to_job(r: JobRecord) -> Job:
         audio_path=r.audio_path,
         r2_audio_key=getattr(r, "r2_audio_key", None),
         transcript=r.transcript,
+        transcript_segments=json.loads(r.transcript_segments_json) if getattr(r, "transcript_segments_json", None) else None,
         minutes=json.loads(r.minutes_json) if r.minutes_json else None,
         speaker_map=json.loads(r.speaker_map_json) if getattr(r, "speaker_map_json", None) else None,
         docx_path=r.docx_path, pdf_path=r.pdf_path,
@@ -117,11 +120,13 @@ class JobStore:
                 "transcript": job.transcript,
             }
 
-        db_kwargs = {k: v for k, v in kwargs.items() if k not in ("minutes", "speaker_map")}
+        db_kwargs = {k: v for k, v in kwargs.items() if k not in ("minutes", "speaker_map", "transcript_segments")}
         if "minutes" in kwargs:
             db_kwargs["minutes_json"] = json.dumps(kwargs["minutes"]) if kwargs["minutes"] else None
         if "speaker_map" in kwargs:
             db_kwargs["speaker_map_json"] = json.dumps(kwargs["speaker_map"]) if kwargs["speaker_map"] else None
+        if "transcript_segments" in kwargs:
+            db_kwargs["transcript_segments_json"] = json.dumps(kwargs["transcript_segments"]) if kwargs["transcript_segments"] else None
         with SessionLocal() as session:
             record = session.get(JobRecord, job_id)
             if record:

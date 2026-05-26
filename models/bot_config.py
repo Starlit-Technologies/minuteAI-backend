@@ -23,6 +23,7 @@ def _defaults() -> dict:
         "profile_dir":       os.environ.get("MEETING_BOT_PROFILE_DIR", ""),
         "bot_refresh_token": os.environ.get("BOT_REFRESH_TOKEN", ""),
         "bot_oauth_email":   "",
+        "intro_video_url":   os.environ.get("INTRO_VIDEO_URL", ""),
     }
 
 
