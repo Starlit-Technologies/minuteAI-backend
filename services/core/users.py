@@ -12,9 +12,9 @@ from schemas.users import OnboardingIn
 _pwd = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 _FALLBACK_LIMITS = {
-    "free":  {"meetings": 3,   "hours": 5,   "workspaces": 1, "members": 3},
-    "pro":   {"meetings": 50,  "hours": 100, "workspaces": 3, "members": 10},
-    "team":  {"meetings": 200, "hours": 500, "workspaces": None, "members": None},
+    "free":  {"meetings": 3,   "hours": 5,   "workspaces": 1,    "members": 3,    "credits": 10},
+    "pro":   {"meetings": 50,  "hours": 100, "workspaces": 3,    "members": 10,   "credits": 500},
+    "team":  {"meetings": 200, "hours": 500, "workspaces": None, "members": None, "credits": None},
 }
 
 
@@ -25,12 +25,15 @@ def _plan_limits(db: Session, plan_name: str) -> dict:
     ).first()
     if row:
         return {
-            "meetings":   row.meetings_per_month,    # None = unlimited
-            "hours":      row.audio_hours_per_month, # None = unlimited
-            "workspaces": row.max_workspaces,        # None = unlimited
-            "members":    row.max_members,           # None = unlimited
+            "meetings":     row.meetings_per_month,
+            "hours":        row.audio_hours_per_month,
+            "workspaces":   row.max_workspaces,
+            "members":      row.max_members,
+            "credits":      row.credits_per_month,
+            "display_name": row.display_name,
         }
-    return _FALLBACK_LIMITS.get(plan_name, _FALLBACK_LIMITS["free"])
+    fb = _FALLBACK_LIMITS.get(plan_name, _FALLBACK_LIMITS["free"])
+    return {**fb, "display_name": plan_name.capitalize()}
 
 
 def update_profile(db: Session, user: User, name: str, email: str) -> dict:
@@ -190,12 +193,26 @@ def get_usage(db: Session, user: User) -> dict:
             except Exception:
                 pass
 
+    from models.user import Workspace, TeamMember
+    workspaces_used = db.query(Workspace).filter(Workspace.owner_id == user.id).count()
+    members_used = (
+        db.query(TeamMember)
+        .filter(TeamMember.owner_id == user.id, TeamMember.status == "active")
+        .count()
+    )
+
     return {
-        "plan":            user.plan or "free",
-        "meetings_used":   len(done_jobs),
-        "meetings_limit":  limits["meetings"],
-        "hours_used":      round(total_minutes / 60, 1),
-        "hours_limit":     limits["hours"],
-        "max_workspaces":  limits["workspaces"],
-        "max_members":     limits["members"],
+        "plan":             user.plan or "free",
+        "plan_display":     limits.get("display_name", (user.plan or "free").capitalize()),
+        "meetings_used":    len(done_jobs),
+        "meetings_limit":   limits["meetings"],
+        "hours_used":       round(total_minutes / 60, 1),
+        "hours_limit":      limits["hours"],
+        "credits_used":     0,
+        "credits_limit":    limits.get("credits"),
+        "workspaces_used":  workspaces_used,
+        "workspaces_limit": limits["workspaces"],
+        "members_used":     members_used,
+        "members_limit":    limits["members"],
+        "trial_ends_at":    user.trial_ends_at.isoformat() if getattr(user, "trial_ends_at", None) else None,
     }
