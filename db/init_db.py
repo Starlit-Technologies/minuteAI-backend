@@ -12,7 +12,10 @@ def create_tables():
     import models.bot_account     # noqa: F401
     import models.connected_account  # noqa: F401
     import models.consent         # noqa: F401
+    import models.support_message # noqa: F401
     import models.meeting_thread  # noqa: F401
+    import models.anomaly         # noqa: F401
+    import models.voice_profile   # noqa: F401
     from db.base import Base
     Base.metadata.create_all(bind=engine)
 
@@ -112,6 +115,17 @@ def run_migrations():
             # Public share token for bot session live-view page
             "ALTER TABLE meeting_bot_sessions ADD COLUMN IF NOT EXISTS share_token TEXT",
             "CREATE UNIQUE INDEX IF NOT EXISTS ix_meeting_bot_sessions_share_token ON meeting_bot_sessions (share_token)",
+            # Support messages
+            "CREATE TABLE IF NOT EXISTS support_messages (id TEXT PRIMARY KEY, user_id TEXT, name TEXT NOT NULL, email TEXT NOT NULL, subject TEXT NOT NULL, message TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open', ip_address TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, resolved_at TIMESTAMP)",
+            # Pre-meeting brief deduplication flag
+            "ALTER TABLE meeting_bot_sessions ADD COLUMN IF NOT EXISTS brief_sent_at TIMESTAMP",
+            # Workspace bot personalisation
+            "ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS bot_name TEXT",
+            "ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS bot_personality TEXT",
+            "ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS bot_trigger_access TEXT",
+            # Voice profiles — workspace-scoped speaker identity store
+            "CREATE TABLE IF NOT EXISTS voice_profiles (id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, person_name TEXT NOT NULL, person_email TEXT, embedding_json TEXT, confirm_count INTEGER NOT NULL DEFAULT 1, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
+            "CREATE INDEX IF NOT EXISTS ix_voice_profiles_workspace_id ON voice_profiles (workspace_id)",
         ]
     else:
         migrations = [
@@ -177,6 +191,16 @@ def run_migrations():
             "ALTER TABLE meeting_threads ADD COLUMN category TEXT",
             # Public share token for bot session live-view page
             "ALTER TABLE meeting_bot_sessions ADD COLUMN share_token TEXT",
+            # Support messages
+            "CREATE TABLE IF NOT EXISTS support_messages (id TEXT PRIMARY KEY, user_id TEXT, name TEXT NOT NULL, email TEXT NOT NULL, subject TEXT NOT NULL, message TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open', ip_address TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, resolved_at DATETIME)",
+            # Pre-meeting brief deduplication flag
+            "ALTER TABLE meeting_bot_sessions ADD COLUMN brief_sent_at DATETIME",
+            # Workspace bot personalisation
+            "ALTER TABLE workspaces ADD COLUMN bot_name TEXT",
+            "ALTER TABLE workspaces ADD COLUMN bot_personality TEXT",
+            "ALTER TABLE workspaces ADD COLUMN bot_trigger_access TEXT",
+            # Voice profiles — workspace-scoped speaker identity store
+            "CREATE TABLE IF NOT EXISTS voice_profiles (id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, person_name TEXT NOT NULL, person_email TEXT, embedding_json TEXT, confirm_count INTEGER NOT NULL DEFAULT 1, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP)",
         ]
     with engine.connect() as conn:
         for sql in migrations:

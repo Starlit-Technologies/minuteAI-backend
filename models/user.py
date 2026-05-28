@@ -55,10 +55,13 @@ class OTPCode(Base):
 class Workspace(Base):
     __tablename__ = "workspaces"
 
-    id         = Column(String, primary_key=True, default=_uuid)
-    name       = Column(String, nullable=False)
-    owner_id   = Column(String, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
-    created_at = Column(DateTime, server_default=func.now())
+    id                  = Column(String, primary_key=True, default=_uuid)
+    name                = Column(String, nullable=False)
+    owner_id            = Column(String, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    bot_name            = Column(String, nullable=True)         # Steph's display name in this workspace
+    bot_personality     = Column(String, nullable=True)         # balanced | direct | warm
+    bot_trigger_access  = Column(String, nullable=True)         # host | all
+    created_at          = Column(DateTime, server_default=func.now())
 
 
 class TeamMember(Base):

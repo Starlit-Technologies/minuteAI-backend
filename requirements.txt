@@ -27,3 +27,6 @@ websockets
 redis
 rq
 pdfplumber
+chromadb
+resemblyzer
+soundfile

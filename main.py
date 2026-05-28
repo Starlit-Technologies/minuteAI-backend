@@ -9,30 +9,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from api.routes.auth import router as auth_router
-from api.routes.users import router as users_router
-from api.routes.meetings import router as meetings_router
-from api.routes.team import router as team_router
+from api.routes.users import users_router, team_router, workspaces_router, tasks_router, notifications_router, integrations_router, meeting_bots_router
+from api.routes.content import meetings_router, threads_router, consent_router
 from api.routes.billing import router as billing_router
-from api.routes.upload import router as upload_router
-from api.routes.status import router as status_router
-from api.routes.results import router as results_router
-from api.routes.download import router as download_router
-from api.routes.ws import router as ws_router, manager
-from api.routes.workspaces import router as workspaces_router
-from api.routes.tasks import router as tasks_router
-from api.routes.notifications import router as notifications_router
-from api.routes.admin import router as admin_router
-from api.routes.meeting_bots import router as meeting_bots_router
-from api.routes.translate import router as translate_router
-from api.routes.integrations import router as integrations_router
-from api.routes.ws_live_translate import router as ws_live_translate_router
-from api.routes.steph import router as steph_router
-from api.routes.ws_live_transcript import router as ws_live_transcript_router
-from api.routes.ai_live import router as ai_live_router
-from api.routes.consent import router as consent_router
-from api.routes.pdf_audio import router as pdf_audio_router
-from api.routes.threads import router as threads_router
-from api.routes.config import router as config_router
+from api.routes.media import upload_router, status_router, results_router, download_router, pdf_audio_router, translate_router
+from api.routes.live import ws_router, manager, ws_live_transcript_router, ws_control_panel_router, ws_live_translate_router, ai_live_router
+from api.routes.admin import admin_router, config_router, support_router, anomalies_router
+from api.routes.ai import steph_router, memory_router, chief_of_staff_router
+from middleware.anomaly import AnomalyMiddleware
 
 from models.job import store
 from db.init_db import create_tables, run_migrations, recover_stuck_jobs, recover_stuck_bot_sessions, seed_default_workspaces
@@ -41,8 +25,11 @@ from models.meeting_bot import recover_processing_sessions
 from services.meeting_bots.runner import start_pending_meeting_bot_sessions, start_bot_session_poll_loop
 from services.meeting_bots.calendar_sync import start_calendar_sync_loop
 from services.meeting_bots.health_check import start_health_check_loop
-from services.user_calendar_sync import start_user_calendar_sync_loop
-from services.trials import start_trial_reminder_loop
+from services.core.user_calendar_sync import start_user_calendar_sync_loop
+from services.core.trials import start_trial_reminder_loop
+from services.notifications.digest import start_weekly_digest_loop
+from services.notifications.pre_meeting_brief import start_pre_meeting_brief_loop
+from services.ai.chief_of_staff import start_daily_briefing_loop
 
 app = FastAPI(title="MinuteAI API", version="1.0.0")
 
@@ -75,6 +62,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(AnomalyMiddleware)
 
 app.include_router(auth_router)
 app.include_router(users_router)
@@ -96,11 +84,16 @@ app.include_router(results_router)
 app.include_router(download_router)
 app.include_router(ws_router)
 app.include_router(ws_live_transcript_router)
+app.include_router(ws_control_panel_router)
 app.include_router(ai_live_router)
 app.include_router(consent_router)
 app.include_router(pdf_audio_router)
 app.include_router(threads_router)
 app.include_router(config_router)
+app.include_router(support_router)
+app.include_router(anomalies_router)
+app.include_router(memory_router)
+app.include_router(chief_of_staff_router)
 
 
 @app.on_event("startup")
@@ -123,6 +116,9 @@ async def startup():
     start_user_calendar_sync_loop()
     start_health_check_loop()
     start_trial_reminder_loop()
+    start_weekly_digest_loop()
+    start_pre_meeting_brief_loop()
+    start_daily_briefing_loop()
 
 
 Path("storage/avatars").mkdir(parents=True, exist_ok=True)

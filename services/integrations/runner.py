@@ -51,3 +51,6 @@ def _dispatch(provider, access_token, settings, job_id, minutes, meeting_context
     elif provider == "google_drive":
         from services.integrations.google_drive import upload_to_drive
         upload_to_drive(access_token, settings, job_id, minutes, APP_URL)
+    elif provider == "teams":
+        from services.integrations.teams import post_meeting_recap
+        post_meeting_recap(settings, job_id, minutes, APP_URL, ctx)

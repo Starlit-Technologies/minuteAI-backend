@@ -33,6 +33,7 @@ class MeetingBotSessionRecord(Base):
     logs_json      = Column(Text,    nullable=True)
     attendees_json = Column(Text,    nullable=True)
     share_token    = Column(String,  nullable=True, unique=True, index=True)
+    brief_sent_at  = Column(DateTime, nullable=True)
     created_at     = Column(DateTime, server_default=func.now())
 
 

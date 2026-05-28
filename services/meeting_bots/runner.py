@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import os
+import queue as _stdlib_queue
 import re
 import subprocess
 import threading
@@ -21,7 +22,7 @@ from models.meeting_bot import (
     update_session,
 )
 from services.meeting_bots.platforms import detect_platform
-from services.processing_pipeline import create_processing_job_from_media
+from services.pipeline.processing_pipeline import create_processing_job_from_media
 
 try:
     from playwright.async_api import async_playwright
@@ -65,6 +66,35 @@ def unregister_bot_audio_listener(session_id: str) -> None:
             q.put_nowait(None)  # wake up any waiting consumer
         except Exception:
             pass
+
+
+# ── TTS speak-in-meeting registry ─────────────────────────────────────────────
+# Maps session_id → thread-safe queue of base64 MP3 payloads to play through
+# the bot's virtual mic inside the Google Meet/Zoom call (public mode only).
+_tts_queues: dict[str, _stdlib_queue.Queue] = {}
+
+
+def register_tts_queue(session_id: str) -> "_stdlib_queue.Queue[str]":
+    q: _stdlib_queue.Queue = _stdlib_queue.Queue(maxsize=20)
+    _tts_queues[session_id] = q
+    return q
+
+
+def unregister_tts_queue(session_id: str) -> None:
+    _tts_queues.pop(session_id, None)
+
+
+def queue_tts(session_id: str, b64_audio: str) -> bool:
+    """Called by the control-panel WS handler to speak audio in the meeting."""
+    q = _tts_queues.get(session_id)
+    if not q:
+        return False
+    try:
+        q.put_nowait(b64_audio)
+        return True
+    except _stdlib_queue.Full:
+        return False
+
 
 GOOGLE_CLIENT_ID     = os.environ.get("GOOGLE_CLIENT_ID", "")
 GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "")
@@ -253,6 +283,69 @@ _AUDIO_CAPTURE_SCRIPT = r"""
     };
     window.__maActive = function() { return recorder !== null && recorder.state === 'recording'; };
     window.__maChunks = function() { return chunks.length; };
+})();
+"""
+
+# ── TTS virtual-mic injection ─────────────────────────────────────────────────
+# Patches getUserMedia to replace the real/fake mic track with an AudioContext
+# MediaStreamDestination we fully control.  __stephSpeak(b64mp3) plays audio
+# through that destination so all meeting participants hear Steph's voice.
+
+_TTS_MIC_SCRIPT = """
+(function() {
+    if (window.__stephMicInstalled) return;
+    window.__stephMicInstalled = true;
+
+    const _AC = window.AudioContext || window.webkitAudioContext;
+    if (!_AC) return;
+
+    let _ctx = null, _dest = null;
+
+    function _setup() {
+        if (_dest) return;
+        _ctx  = new _AC({ sampleRate: 48000 });
+        _dest = _ctx.createMediaStreamDestination();
+        // Ensure context starts running even without a user gesture
+        [0, 200, 1000, 3000].forEach(function(ms) {
+            setTimeout(function() { _ctx.state === 'suspended' && _ctx.resume().catch(function(){}); }, ms);
+        });
+    }
+
+    // Intercept getUserMedia: swap any audio track for our virtual mic track
+    if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+        var _origGUM = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+        navigator.mediaDevices.getUserMedia = function(constraints) {
+            _setup();
+            return _origGUM(constraints).then(function(stream) {
+                if (constraints && constraints.audio) {
+                    var virt = _dest.stream.getAudioTracks()[0];
+                    if (virt) {
+                        stream.getAudioTracks().forEach(function(t) {
+                            stream.removeTrack(t);
+                            try { t.stop(); } catch(_) {}
+                        });
+                        // Clone so each caller gets an independent track reference
+                        stream.addTrack(virt.clone());
+                    }
+                }
+                return stream;
+            });
+        };
+    }
+
+    // Play base64 MP3 through the virtual mic so the room hears Steph
+    window.__stephSpeak = function(b64mp3) {
+        _setup();
+        return _ctx.resume().catch(function(){}).then(function() {
+            var bytes = Uint8Array.from(atob(b64mp3), function(c) { return c.charCodeAt(0); });
+            return _ctx.decodeAudioData(bytes.buffer);
+        }).then(function(audioBuffer) {
+            var src = _ctx.createBufferSource();
+            src.buffer = audioBuffer;
+            src.connect(_dest);
+            src.start();
+        }).catch(function(e) { console.warn('Steph speak error:', e); });
+    };
 })();
 """
 
@@ -1916,6 +2009,7 @@ async def _run_playwright_session(ctx: BotRunContext):
     drain_task: Optional[asyncio.Task] = None
     pcm_drain_task: Optional[asyncio.Task] = None
     announce_task: Optional[asyncio.Task] = None
+    tts_task: Optional[asyncio.Task] = None
 
     CAPTURE_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -1979,7 +2073,8 @@ async def _run_playwright_session(ctx: BotRunContext):
 
                 await context.add_init_script(_ANTIDETECT_SCRIPT)
                 await context.add_init_script(_AUDIO_CAPTURE_SCRIPT)
-                _log(ctx.session_id, "Anti-detect + audio capture scripts registered")
+                await context.add_init_script(_TTS_MIC_SCRIPT)
+                _log(ctx.session_id, "Anti-detect + audio capture + TTS mic scripts registered")
 
                 page = await context.new_page()
                 await _take_debug_screenshot(page, ctx.session_id, "landing")
@@ -2042,11 +2137,25 @@ async def _run_playwright_session(ctx: BotRunContext):
 
                 _log(ctx.session_id, "Admitted — audio capture active")
 
+                # Register TTS queue so the control-panel WS can push audio to the meeting
+                _tts_q = register_tts_queue(ctx.session_id)
+
+                async def _drain_tts():
+                    while True:
+                        try:
+                            b64 = _tts_q.get_nowait()
+                            with suppress(Exception):
+                                await page.evaluate("(b64) => window.__stephSpeak(b64)", b64)
+                        except _stdlib_queue.Empty:
+                            pass
+                        await asyncio.sleep(0.1)
+
                 # Send recording announcements in the background (initial + latecomer reminder)
                 announce_task = asyncio.create_task(
                     _schedule_recording_announcements(page, ctx.session_id, ctx.platform, ctx.user_name)
                 )
 
+                tts_task       = asyncio.create_task(_drain_tts())
                 drain_task     = asyncio.create_task(_drain_audio_chunks(page, audio_chunks, ctx.session_id))
                 pcm_drain_task = asyncio.create_task(_drain_pcm_for_live_translate(page, ctx.session_id))
                 await _wait_for_recording_completion(page, ctx.session_id, ctx.platform)
@@ -2078,6 +2187,13 @@ async def _run_playwright_session(ctx: BotRunContext):
                         await pcm_drain_task
                     except BaseException:
                         pass
+                if tts_task and not tts_task.done():
+                    tts_task.cancel()
+                    try:
+                        await tts_task
+                    except BaseException:
+                        pass
+                unregister_tts_queue(ctx.session_id)
                 unregister_bot_audio_listener(ctx.session_id)
 
                 # Stop recorder and do final drain across all frames
@@ -2186,7 +2302,7 @@ def _run_session_inner(session_id: str):
     # this function runs we're already within the early-join window.
     # In thread-fallback mode we still do the busy-wait for compatibility.
     if session.scheduled_for:
-        from services.queue import is_redis_available
+        from services.core.queue import is_redis_available
         if not is_redis_available():
             # Thread fallback: busy-wait until 90s before start
             update_session(session_id, status="scheduled")
@@ -2247,7 +2363,7 @@ def start_meeting_bot_session(session_id: str):
     For scheduled sessions, RQ's enqueue_at fires the job 90s before the
     meeting starts.  For immediate sessions the job runs right away.
     """
-    from services.queue import enqueue_session, is_redis_available
+    from services.core.queue import enqueue_session, is_redis_available
 
     session = get_session(session_id)
     if not session or session.status == "cancelled":

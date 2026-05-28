@@ -216,8 +216,8 @@ def _maybe_send_alert(result: dict) -> None:
     _last_alert_sent = error
 
     try:
-        import services.admin as svc
-        from services.email import send_bot_auth_alert
+        import services.core.admin as svc
+        from services.notifications.email import send_bot_auth_alert
         admin_emails = list(svc.configured_admin_emails())
         if admin_emails:
             send_bot_auth_alert(admin_emails, result.get("email"), error)
