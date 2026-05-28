@@ -6,7 +6,7 @@ import anthropic
 
 client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
-SYSTEM_PROMPT = (Path(__file__).parent.parent / "prompts" / "minutes_formatter.txt").read_text()
+SYSTEM_PROMPT = (Path(__file__).parent.parent.parent / "prompts" / "minutes_formatter.txt").read_text()
 
 # Tool schema — Claude fills this in, giving us validated structured output
 MINUTES_TOOL = {
