@@ -580,13 +580,18 @@ def send_daily_briefing(
     # ── today's meetings ───────────────────────────────────────────────────
     meetings_html = ""
     if todays_meetings:
-        rows = "".join(
-            f'<tr><td style="padding:8px 0;border-bottom:1px solid #f3f4f6">'
-            f'<span style="font-size:14px;font-weight:600;color:#111827">{m["title"]}</span>'
-            f'{f"<span style=\'font-size:12px;color:#6b7280;margin-left:8px\'>{m[\'scheduled_for\']}</span>" if m.get("scheduled_for") else ""}'
-            f'</td></tr>'
-            for m in todays_meetings
-        )
+        def _meeting_row(m):
+            time_tag = (
+                f'<span style="font-size:12px;color:#6b7280;margin-left:8px">'
+                f'{m["scheduled_for"]}</span>'
+            ) if m.get("scheduled_for") else ""
+            return (
+                f'<tr><td style="padding:8px 0;border-bottom:1px solid #f3f4f6">'
+                f'<span style="font-size:14px;font-weight:600;color:#111827">{m["title"]}</span>'
+                f'{time_tag}'
+                f'</td></tr>'
+            )
+        rows = "".join(_meeting_row(m) for m in todays_meetings)
         meetings_html = f"""
         <div style="margin-bottom:20px">
           <p style="font-size:11px;font-weight:600;color:#9ca3af;letter-spacing:.06em;
