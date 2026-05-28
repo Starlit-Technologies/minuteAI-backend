@@ -55,6 +55,25 @@ def meeting_stats(
     return get_meeting_stats(db, current_user.id, workspace_id)
 
 
+def _parse_duration_minutes(s: str) -> float:
+    """Parse '1h 30m', '45 minutes', '2 hours', '1:30:00' → float minutes."""
+    import re
+    if not s:
+        return 0
+    s = s.strip().lower()
+    m = re.match(r'^(\d+):(\d+)(?::(\d+))?$', s)
+    if m:
+        return int(m.group(1)) * 60 + int(m.group(2))
+    total = 0.0
+    m = re.search(r'(\d+(?:\.\d+)?)\s*h(?:our)?s?', s)
+    if m:
+        total += float(m.group(1)) * 60
+    m = re.search(r'(\d+(?:\.\d+)?)\s*m(?:in(?:ute)?s?)?(?!\s*h)', s)
+    if m:
+        total += float(m.group(1))
+    return total
+
+
 @router.get("/analytics")
 def meeting_analytics(
     days: int = Query(84, ge=7, le=365),
@@ -73,11 +92,18 @@ def meeting_analytics(
         base_q = base_q.filter(JobRecord.workspace_id == workspace_id)
     records = base_q.order_by(JobRecord.created_at.asc()).all()
 
-    # --- aggregate ---
+    DAY_NAMES = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+
     weekly: dict[str, int] = defaultdict(int)
     action_weekly: dict[str, int] = defaultdict(int)
     status_counts: dict[str, int] = defaultdict(int)
+    day_counts: dict[str, int] = defaultdict(int)
+    participant_counts: dict[str, int] = defaultdict(int)
     total_actions = 0
+    total_decisions = 0
+    total_duration_min = 0.0
+    duration_count = 0
+    meetings_no_actions = 0
 
     for r in records:
         created = r.created_at
@@ -88,7 +114,7 @@ def meeting_analytics(
 
         yr, wk, _ = created.isocalendar()
         week_key = f"{yr}-W{wk:02d}"
-
+        day_counts[DAY_NAMES[created.weekday()]] += 1
         status_counts[r.status] += 1
         if r.status == "done":
             weekly[week_key] += 1
@@ -104,8 +130,52 @@ def meeting_analytics(
             n = len(items)
             total_actions += n
             action_weekly[week_key] += n
+            if n == 0 and r.status == "done":
+                meetings_no_actions += 1
 
-    # Build ordered week labels (fill gaps with 0)
+            decisions = minutes.get("key_decisions") or minutes.get("keyDecisions") or []
+            total_decisions += len(decisions)
+
+            meta = minutes.get("metadata") or {}
+            dur = _parse_duration_minutes(meta.get("duration") or "")
+            if dur > 0:
+                total_duration_min += dur
+                duration_count += 1
+
+            for p in (meta.get("participants") or []):
+                if isinstance(p, str) and p.strip():
+                    participant_counts[p.strip()] += 1
+
+    # Bot vs upload
+    done_ids = {r.id for r in records if r.status == "done"}
+    bot_count = 0
+    try:
+        from models.meeting_bot import MeetingBotSessionRecord
+        bot_job_ids = {
+            row.job_id for row in
+            db.query(MeetingBotSessionRecord.job_id)
+              .filter(MeetingBotSessionRecord.job_id.in_(done_ids))
+              .all()
+            if row.job_id
+        }
+        bot_count = len(bot_job_ids)
+    except Exception:
+        pass
+
+    # Task completion rate
+    completion_rate = None
+    try:
+        from models.task import TaskRecord
+        tq = db.query(TaskRecord).filter(TaskRecord.job_id.in_(done_ids))
+        if workspace_id:
+            tq = tq.filter(TaskRecord.workspace_id == workspace_id)
+        all_tasks = tq.all()
+        if all_tasks:
+            completion_rate = round(sum(1 for t in all_tasks if t.status == "done") / len(all_tasks) * 100, 1)
+    except Exception:
+        pass
+
+    # Week series
     num_weeks = (days // 7) + 1
     week_labels: list[str] = []
     for i in range(num_weeks - 1, -1, -1):
@@ -113,14 +183,25 @@ def meeting_analytics(
         yr, wk, _ = d.isocalendar()
         week_labels.append(f"{yr}-W{wk:02d}")
     week_labels = list(dict.fromkeys(week_labels))
-
     weekly_series = [{"week": w, "meetings": weekly.get(w, 0), "actions": action_weekly.get(w, 0)} for w in week_labels]
 
     return {
-        "total_meetings": status_counts.get("done", 0),
-        "total_actions": total_actions,
-        "by_status": dict(status_counts),
-        "weekly_series": weekly_series,
+        "total_meetings":    status_counts.get("done", 0),
+        "total_actions":     total_actions,
+        "total_decisions":   total_decisions,
+        "total_hours":       round(total_duration_min / 60, 1),
+        "avg_duration_min":  round(total_duration_min / duration_count, 1) if duration_count else None,
+        "meetings_no_actions": meetings_no_actions,
+        "by_status":         dict(status_counts),
+        "weekly_series":     weekly_series,
+        "busiest_day_series": [{"day": d, "count": day_counts.get(d, 0)} for d in DAY_NAMES],
+        "top_participants":  sorted(
+            [{"name": k, "count": v} for k, v in participant_counts.items()],
+            key=lambda x: x["count"], reverse=True
+        )[:8],
+        "bot_count":         bot_count,
+        "upload_count":      max(status_counts.get("done", 0) - bot_count, 0),
+        "completion_rate":   completion_rate,
     }
 
 
