@@ -737,12 +737,15 @@ def send_weekly_digest(
         </div>"""
 
     def _done_row(t: dict) -> str:
+        meeting_tag = (
+            f'<span style="font-size:11px;color:#9ca3af;margin-left:8px">'
+            f'from {t["meeting_title"]}</span>'
+        ) if t.get("meeting_title") else ""
         return (
             f'<tr><td style="padding:7px 0;border-bottom:1px solid #f3f4f6">'
             f'<span style="font-size:13px;color:#6b7280;text-decoration:line-through">'
             f'{t.get("title","")}</span>'
-            f'{f"<span style=\'font-size:11px;color:#9ca3af;margin-left:8px\'>"
-               f"from {t[\'meeting_title\']}</span>" if t.get("meeting_title") else ""}'
+            f'{meeting_tag}'
             f'</td></tr>'
         )
 
