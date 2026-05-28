@@ -152,6 +152,24 @@ def delete_account(db: Session, user: User) -> dict:
     return {"message": "Account deleted."}
 
 
+def _parse_duration_minutes(s: str) -> float:
+    import re
+    if not s:
+        return 0
+    s = s.strip().lower()
+    m = re.match(r'^(\d+):(\d+)(?::(\d+))?$', s)
+    if m:
+        return int(m.group(1)) * 60 + int(m.group(2))
+    total = 0.0
+    m = re.search(r'(\d+(?:\.\d+)?)\s*h(?:our)?s?', s)
+    if m:
+        total += float(m.group(1)) * 60
+    m = re.search(r'(\d+(?:\.\d+)?)\s*m(?:in(?:ute)?s?)?(?!\s*h)', s)
+    if m:
+        total += float(m.group(1))
+    return total
+
+
 def get_usage(db: Session, user: User) -> dict:
     done_jobs = (
         db.query(JobRecord)
@@ -159,12 +177,25 @@ def get_usage(db: Session, user: User) -> dict:
         .all()
     )
     limits = _plan_limits(db, user.plan or "free")
+
+    total_minutes = 0.0
+    for job in done_jobs:
+        minutes_data = getattr(job, "minutes_json", None)
+        if minutes_data:
+            try:
+                parsed = json.loads(minutes_data) if isinstance(minutes_data, str) else minutes_data
+                meta = parsed.get("metadata") or {}
+                dur = _parse_duration_minutes(meta.get("duration") or "")
+                total_minutes += dur
+            except Exception:
+                pass
+
     return {
         "plan":            user.plan or "free",
         "meetings_used":   len(done_jobs),
-        "meetings_limit":  limits["meetings"],    # None = unlimited
-        "hours_used":      0,
-        "hours_limit":     limits["hours"],       # None = unlimited
-        "max_workspaces":  limits["workspaces"],  # None = unlimited
-        "max_members":     limits["members"],     # None = unlimited
+        "meetings_limit":  limits["meetings"],
+        "hours_used":      round(total_minutes / 60, 1),
+        "hours_limit":     limits["hours"],
+        "max_workspaces":  limits["workspaces"],
+        "max_members":     limits["members"],
     }
