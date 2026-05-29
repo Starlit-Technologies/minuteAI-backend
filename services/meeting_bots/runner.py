@@ -38,6 +38,10 @@ CAPTURE_DIR = Path(__file__).parent.parent.parent / "storage" / "meeting_bot_cap
 # None is the sentinel that ends the stream.
 _live_audio_queues: dict[str, asyncio.Queue] = {}
 
+# ── Bot live listener audio registry ──────────────────────────────────────────
+# Separate fan-out target for BotLiveListener (always-on transcription + wake word).
+_bot_listener_queues: dict[str, asyncio.Queue] = {}
+
 # ── Stop-signal set ───────────────────────────────────────────────────────────
 # The /end API route adds a session_id here so the recording loop wakes up
 # immediately instead of waiting for the next 1-second DB poll.
@@ -64,6 +68,21 @@ def unregister_bot_audio_listener(session_id: str) -> None:
     if q:
         try:
             q.put_nowait(None)  # wake up any waiting consumer
+        except Exception:
+            pass
+
+
+def register_bot_listener_queue(session_id: str) -> asyncio.Queue:
+    q: asyncio.Queue = asyncio.Queue(maxsize=500)
+    _bot_listener_queues[session_id] = q
+    return q
+
+
+def unregister_bot_listener_queue(session_id: str) -> None:
+    q = _bot_listener_queues.pop(session_id, None)
+    if q:
+        try:
+            q.put_nowait(None)
         except Exception:
             pass
 
@@ -454,16 +473,18 @@ async def _drain_audio_chunks(page, chunks_store: list, session_id: str):
 
 async def _drain_pcm_for_live_translate(page, session_id: str):
     """
-    Fast drain loop (250ms) for PCM audio chunks.  Only activates the browser-
-    side ScriptProcessor when a live-translate client is registered, so there's
-    no overhead when nobody is listening.
+    Fast drain loop (250ms) for PCM audio chunks.  Activates the browser-side
+    ScriptProcessor when any consumer is registered (live-translate client OR
+    the always-on BotLiveListener).  Fans out to both queues when present.
     """
     pcm_was_active = False
     while True:
         await asyncio.sleep(0.25)
-        q = _live_audio_queues.get(session_id)
+        q_translate = _live_audio_queues.get(session_id)
+        q_listener  = _bot_listener_queues.get(session_id)
+        has_consumer = q_translate is not None or q_listener is not None
         try:
-            if q is None:
+            if not has_consumer:
                 if pcm_was_active:
                     await page.evaluate("window.__maPcmStop && window.__maPcmStop()")
                     pcm_was_active = False
@@ -477,7 +498,10 @@ async def _drain_pcm_for_live_translate(page, session_id: str):
             for b64 in (chunks or []):
                 try:
                     pcm = base64.b64decode(b64)
-                    q.put_nowait(pcm)
+                    if q_translate is not None:
+                        q_translate.put_nowait(pcm)
+                    if q_listener is not None:
+                        q_listener.put_nowait(pcm)
                 except Exception:
                     pass
         except Exception:
@@ -2010,6 +2034,8 @@ async def _run_playwright_session(ctx: BotRunContext):
     pcm_drain_task: Optional[asyncio.Task] = None
     announce_task: Optional[asyncio.Task] = None
     tts_task: Optional[asyncio.Task] = None
+    _listener = None          # BotLiveListener instance
+    _live_transcript: str = ""
 
     CAPTURE_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -2158,6 +2184,18 @@ async def _run_playwright_session(ctx: BotRunContext):
                 tts_task       = asyncio.create_task(_drain_tts())
                 drain_task     = asyncio.create_task(_drain_audio_chunks(page, audio_chunks, ctx.session_id))
                 pcm_drain_task = asyncio.create_task(_drain_pcm_for_live_translate(page, ctx.session_id))
+
+                # Always-on live listener: real-time transcript + wake-word for Steph
+                from services.meeting_bots.live_listener import BotLiveListener
+                _listener = BotLiveListener(
+                    session_id=ctx.session_id,
+                    user_id=ctx.user_id,
+                    workspace_id=session.workspace_id,
+                    bot_name=ctx.bot_name,
+                )
+                _listener_q = register_bot_listener_queue(ctx.session_id)
+                _listener.start(_listener_q)
+
                 await _wait_for_recording_completion(page, ctx.session_id, ctx.platform)
 
             except Exception as exc:
@@ -2195,6 +2233,16 @@ async def _run_playwright_session(ctx: BotRunContext):
                         pass
                 unregister_tts_queue(ctx.session_id)
                 unregister_bot_audio_listener(ctx.session_id)
+                unregister_bot_listener_queue(ctx.session_id)
+
+                # Stop the live listener and capture its transcript
+                if _listener is not None:
+                    try:
+                        _live_transcript = await _listener.stop()
+                        if _live_transcript:
+                            _log(ctx.session_id, f"Live transcript captured: {len(_live_transcript)} chars")
+                    except Exception as _le:
+                        _log(ctx.session_id, f"Live listener stop error: {_le}")
 
                 # Stop recorder and do final drain across all frames
                 all_frames = [page] + list(page.frames) if page else []
@@ -2254,6 +2302,7 @@ async def _run_playwright_session(ctx: BotRunContext):
                 workspace_id=session.workspace_id,
                 attendees=session.attendees or None,
                 meeting_title=session.title or None,
+                transcript=_live_transcript or None,
             )
             update_session(
                 ctx.session_id,

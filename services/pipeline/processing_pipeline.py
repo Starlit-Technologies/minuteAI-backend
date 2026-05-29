@@ -47,6 +47,7 @@ def create_processing_job_from_media(
     workspace_id: Optional[str] = None,
     attendees: Optional[list[str]] = None,
     meeting_title: Optional[str] = None,
+    transcript: Optional[str] = None,
 ) -> str:
     job_id = str(uuid.uuid4())
     suffix = Path(original_filename).suffix.lower() or Path(media_path).suffix.lower() or ".mp4"
@@ -84,6 +85,7 @@ def create_processing_job_from_media(
         workspace_id=workspace_id,
         audio_path=final_media_path,
         job_config=config if config else None,
+        transcript=transcript or None,
     ))
 
     # Also upload to R2 if configured

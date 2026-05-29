@@ -92,13 +92,42 @@ def meeting_analytics(
         base_q = base_q.filter(JobRecord.workspace_id == workspace_id)
     records = base_q.order_by(JobRecord.created_at.asc()).all()
 
+    all_ids  = {r.id for r in records}
+    done_ids = {r.id for r in records if r.status == "done"}
+
+    # ── Bot job IDs and per-job category (from thread) ──────────────────────
+    bot_job_ids:    set[str]        = set()
+    job_to_category: dict[str, str] = {}
+    try:
+        from models.meeting_bot import MeetingBotSessionRecord
+        from models.meeting_thread import ThreadSessionRecord, MeetingThreadRecord
+        bot_rows = db.query(MeetingBotSessionRecord.job_id).filter(
+            MeetingBotSessionRecord.job_id.in_(all_ids)
+        ).all()
+        bot_job_ids = {row.job_id for row in bot_rows if row.job_id}
+        if bot_job_ids:
+            thread_sessions = db.query(ThreadSessionRecord).filter(
+                ThreadSessionRecord.job_id.in_(bot_job_ids)
+            ).all()
+            t_ids = list({s.thread_id for s in thread_sessions})
+            if t_ids:
+                threads = db.query(MeetingThreadRecord).filter(
+                    MeetingThreadRecord.id.in_(t_ids)
+                ).all()
+                thread_cat = {t.id: (t.category or "Uncategorized") for t in threads}
+                for s in thread_sessions:
+                    job_to_category[s.job_id] = thread_cat.get(s.thread_id, "Uncategorized")
+    except Exception:
+        pass
+
     DAY_NAMES = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
 
     weekly: dict[str, int] = defaultdict(int)
     action_weekly: dict[str, int] = defaultdict(int)
     status_counts: dict[str, int] = defaultdict(int)
     day_counts: dict[str, int] = defaultdict(int)
-    participant_counts: dict[str, int] = defaultdict(int)
+    # participants: bot-only, keyed by category then name
+    cat_participant_counts: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
     total_actions = 0
     total_decisions = 0
     total_duration_min = 0.0
@@ -142,25 +171,12 @@ def meeting_analytics(
                 total_duration_min += dur
                 duration_count += 1
 
-            for p in (meta.get("participants") or []):
-                if isinstance(p, str) and p.strip():
-                    participant_counts[p.strip()] += 1
-
-    # Bot vs upload
-    done_ids = {r.id for r in records if r.status == "done"}
-    bot_count = 0
-    try:
-        from models.meeting_bot import MeetingBotSessionRecord
-        bot_job_ids = {
-            row.job_id for row in
-            db.query(MeetingBotSessionRecord.job_id)
-              .filter(MeetingBotSessionRecord.job_id.in_(done_ids))
-              .all()
-            if row.job_id
-        }
-        bot_count = len(bot_job_ids)
-    except Exception:
-        pass
+            # Only count participants from bot-recorded meetings
+            if r.id in bot_job_ids:
+                cat = job_to_category.get(r.id, "Uncategorized")
+                for p in (meta.get("participants") or []):
+                    if isinstance(p, str) and p.strip():
+                        cat_participant_counts[cat][p.strip()] += 1
 
     # Task completion rate
     completion_rate = None
@@ -185,6 +201,14 @@ def meeting_analytics(
     week_labels = list(dict.fromkeys(week_labels))
     weekly_series = [{"week": w, "meetings": weekly.get(w, 0), "actions": action_weekly.get(w, 0)} for w in week_labels]
 
+    # Flatten to top-level participant list (bot-only) for convenience
+    all_participant_counts: dict[str, int] = defaultdict(int)
+    for counts in cat_participant_counts.values():
+        for name, cnt in counts.items():
+            all_participant_counts[name] += cnt
+
+    bot_count = len(bot_job_ids & done_ids)
+
     return {
         "total_meetings":    status_counts.get("done", 0),
         "total_actions":     total_actions,
@@ -196,9 +220,22 @@ def meeting_analytics(
         "weekly_series":     weekly_series,
         "busiest_day_series": [{"day": d, "count": day_counts.get(d, 0)} for d in DAY_NAMES],
         "top_participants":  sorted(
-            [{"name": k, "count": v} for k, v in participant_counts.items()],
+            [{"name": k, "count": v} for k, v in all_participant_counts.items()],
             key=lambda x: x["count"], reverse=True
         )[:8],
+        "top_participants_by_category": [
+            {
+                "category": cat,
+                "participants": sorted(
+                    [{"name": k, "count": v} for k, v in counts.items()],
+                    key=lambda x: x["count"], reverse=True
+                )[:6],
+            }
+            for cat, counts in sorted(
+                cat_participant_counts.items(),
+                key=lambda x: sum(x[1].values()), reverse=True,
+            )
+        ],
         "bot_count":         bot_count,
         "upload_count":      max(status_counts.get("done", 0) - bot_count, 0),
         "completion_rate":   completion_rate,
